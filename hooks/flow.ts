@@ -229,3 +229,28 @@ export function agentStep(run: Run, agentId: string): [number, number] | null {
   }
   return null
 }
+
+/** What may follow /flows that is not a flow's name: what the typeahead says of each, and whether a flow's name comes next. */
+export const COMMANDS: Record<string, { says: string; named: boolean }> = {
+  list: { says: "Lists this project's flows", named: false },
+  new: { says: 'Writes a new flow with you: <name> <what it should do>', named: false },
+  edit: { says: 'Changes a flow: <name> <what to change>', named: true },
+  run: { says: 'Runs a flow: <name> [input]', named: true },
+  retry: { says: 'Takes up a failed or stopped run: <name>', named: true },
+  delete: { says: 'Deletes a flow: <name>', named: true },
+}
+
+/** The typeahead's rows for the word being typed in a draft that begins with /flows: the commands, and the project's flows where a name goes. */
+export function complete(text: string, token: string, start: number, flows: readonly { name: string; description: string }[]): { text: string; label?: string; description?: string }[] {
+  // A command that takes more is written with its space, so the next word starts at once.
+  const verbs = Object.entries(COMMANDS).map(([verb, c]) => ({ verb, text: verb === 'list' ? verb : `${verb} `, description: c.says }))
+  // Still on the command itself: every command, written whole.
+  if (start === 0) return token === '/flows' ? verbs.map(v => ({ text: `/flows ${v.text}`, label: `/flows ${v.verb}`, description: v.description })) : []
+  const before = text.slice(0, start).split(/\s+/).filter(Boolean)
+  if (before[0] !== '/flows') return []
+  const named = flows.filter(f => f.name.startsWith(token) && f.name !== token).map(f => ({ text: f.name, description: f.description }))
+  // The first word: a command, or a flow to show.
+  if (before.length === 1) return [...verbs.filter(v => v.verb.startsWith(token) && v.verb !== token).map(v => ({ text: v.text, label: v.verb, description: v.description })), ...named]
+  // The second word, after a command that works on a flow: its name.
+  return before.length === 2 && COMMANDS[before[1] ?? '']?.named ? named : []
+}

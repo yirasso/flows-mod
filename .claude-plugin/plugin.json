@@ -1,6 +1,6 @@
 {
   "name": "flows",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Saved, repeatable AI flows for Claude Code: agents, Node scripts, approvals and a for-each, written with you in the chat, run with one command and shown step by step in a pane.",
   "author": {
     "name": "Tomas Girao"
