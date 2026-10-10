@@ -1,0 +1,8 @@
+{
+  "name": "flows",
+  "version": "0.1.0",
+  "description": "Saved multi-step AI flows (agents, code, approvals, for-each) that run from a pane inside Claude Code.",
+  "author": { "name": "Tomas Girao" },
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}

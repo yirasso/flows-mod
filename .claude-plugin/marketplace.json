@@ -1,0 +1,6 @@
+{
+  "name": "flows-local",
+  "owner": { "name": "Tomas Girao" },
+  "metadata": { "description": "The Flows plugin, read from its own folder." },
+  "plugins": [{ "name": "flows", "source": "./", "description": "Saved multi-step AI flows that run from a pane inside Claude Code." }]
+}
