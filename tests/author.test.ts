@@ -109,4 +109,9 @@ test('/flow new and /flow edit: the tool explains, checks the proposal, shows th
   expect(await draft({ action: 'propose', description: 'Greets someone, quietly.', steps: [{ ...AGENT, instruction: 'Whisper a greeting.' }, CODE] })).toContain('"Save"')
   expect(await draft({ action: 'discard' })).toContain('nothing was saved')
   expect(files.get(`${ROOT}/hello/flow.json`)).toContain('loudly')
+
+  // A fix the person already said yes to is saved at once: no draft, no second question.
+  expect(await draft({ action: 'propose', agreed: true, description: 'Greets someone, softly.', steps: [AGENT, CODE] })).toContain('Saved the change')
+  expect(files.get(`${ROOT}/hello/flow.json`)).toContain('softly')
+  expect(await shown()).not.toContain('Draft, not saved yet')
 })

@@ -46,7 +46,7 @@ A flow is a plain list, top to bottom. Each step receives what the one before ha
 - **Read-only, no buttons** (Tomás, 10 Oct 2026, "for now"): everything is done from the chat, and approvals are asked there. From top to bottom: the flow, the run's status (time, tokens, week ≈ x%), the steps, and the commands.
 - Each step is one row: its character, name, description, model, effort and progress.
 - **Characters:** a pixel crab drawn from scratch as SVG, wearing the costume of the step's role, moving while it works. Eight roles: researcher, writer, builder, designer, coder, reviewer, analyst, messenger. Steps that are not agents have their own drawing. The technique follows the savvy-progress mod (MIT), which gets a thank-you in the README.
-- Each finished step shows the start of what it handed on. `/flow show <name>` picks the flow.
+- Each finished step shows the start of what it handed on. `/flow <name>` picks the flow.
 - **Week %:** the weekly limit's percent used when the run ended minus when it started, shown with "≈" (other work in the same period counts too).
 - With the pane closed: a band above the prompt when a flow needs the person, and a short toast when one finishes.
 - The look follows the Claudify plugin.
@@ -59,13 +59,14 @@ A flow is a plain list, top to bottom. Each step receives what the one before ha
   - `propose` sends the whole flow. The plugin checks it (`hooks/author.ts`) and shows it in the pane as a draft; a fault goes back to Claude in words;
   - Claude then tells the person the steps, what it assumed and left out, shows the code of any script, and asks: Save, Change something, or Discard;
   - `save` writes `flow.json` and the scripts; `discard` drops the draft. Nothing is saved before the person says so.
-- `/flow run <name> [input]`, `/flow stop <name>`, `/flow retry <name>`, `/flow show <name> [run]`.
-- **When a run fails:** the tool tells Claude to say what failed and propose one fix, and to change nothing until the person agrees. The fix is made with the draft tool, and `mcp__flows__next` with `retry: true` takes the run up again at the failed step. A run goes on with a changed flow only if its steps are still the same ones (same ids and types, in order); otherwise it needs a new run.
+- `/flow run <name> [input]`, `/flow retry <name>`, and `/flow <name> [run]`, which shows a flow in the pane, or one of its earlier runs (Tomás, 10 Oct 2026: no `show` word). A flow cannot be named new, edit, run or retry.
+- **Stopping a flow is stopping the chat** (Tomás, 10 Oct 2026: a `/flow stop` command was built and dropped, since a command typed while the chat works waits for the turn to end). The run shows as stopped, and `/flow retry` takes it up again.
+- **When a run fails:** the tool tells Claude to say what failed and propose one fix, and to change nothing until the person agrees. The person is asked once: their yes to the fix is the yes to saving it (Tomás, 10 Oct 2026: a second "save?" question was built and dropped). Claude proposes the fixed flow with `agreed: true`, which saves it at once, and `mcp__flows__next` with `retry: true` takes the run up again at the failed step. A run goes on with a changed flow only if its steps are still the same ones (same ids and types, in order); otherwise it needs a new run.
 
 ## Build order
 
 1. **The engine and a plain pane.** Done on 10 Oct 2026: the four step types, Run, Stop, approvals, retry, the test flow `test-facts`.
-2. **The real pane.** Done on 10 Oct 2026 in `hooks/draw.ts`: the characters and their eight costumes, the three tiles, the weekly limit bar, one drawn row per step and per item, earlier runs with `/flow show <name> <run>`, and only the last 10 runs kept. Left out: the band above the prompt (approvals and failures already come to the chat) and the "3/5" inside a step.
+2. **The real pane.** Done on 10 Oct 2026 in `hooks/draw.ts`: the characters and their eight costumes, the three tiles, the weekly limit bar, one drawn row per step and per item, earlier runs with `/flow <name> <run>`, and only the last 10 runs kept. Left out: the band above the prompt (approvals and failures already come to the chat) and the "3/5" inside a step.
 3. **The chat.** Done on 10 Oct 2026: `/flow new` with the interview, `/flow edit`, the draft in the pane, the failure report with a fix and the retry from the tool.
 
 ## What was tried first, and why it was dropped

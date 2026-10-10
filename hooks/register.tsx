@@ -31,6 +31,10 @@ const me = atom({ plugin: 'flows', key: 'me' } as const, '')
 const draft = atom({ plugin: 'flows', key: 'draft' } as const, null)
 
 /** How often the timer looks at the flows folder, the time limits and the heartbeat. */
+/** The first words of /flow that are not a flow's name; a flow cannot be called by one. */
+const VERBS = ['new', 'edit', 'run', 'retry']
+const USAGE = 'Usage: /flow · /flow <name> [run] · /flow new <name> <what it should do> · /flow edit <name> <what to change> · /flow run <name> [input] · /flow retry <name>'
+
 const TICK = 5000
 /** A run whose session has not said it is alive for this long was interrupted. */
 const STALE = 60_000
@@ -44,6 +48,9 @@ let inflight: Promise<unknown> = Promise.resolve()
 const ended = new Map<string, { answer: string; reason: string; tokens: number }>()
 /** Flow agents the session's Claude started in the background: their turn's end is their result. */
 const detached = new Set<string>()
+/** The session's own turn that is running now, and the turn each flow's run was last worked on in: a turn the person stops takes its flows with it. */
+let mainTurn: string | undefined
+const turnOf = new Map<string, string>()
 
 // ——— The flows folder ———
 
@@ -321,7 +328,7 @@ async function directive($: EngineInterface, name: string): Promise<string> {
     return [
       `${head} It finished${run.ended ? `: ${run.ended}` : ''}. Its files are in ${runDir(await rootDir($), name, run.id)}.`,
       `Tell the user it is done in a line or two, with the result${last.length > 1 ? 's' : ''} of its last step:`,
-      ...last.slice(0, 8).map(text => `- ${text.slice(0, 600)}`),
+      ...last.slice(0, 8).map(text => `- ${text.slice(0, Math.max(600, Math.floor(4000 / last.length)))}`),
     ].join('\n')
   }
   if (run.status === 'failed') {
@@ -329,12 +336,12 @@ async function directive($: EngineInterface, name: string): Promise<string> {
     return [
       `${head} It failed:`,
       ...failed.map(line => `- ${line}`),
-      `Tell the user what failed, in plain words, and propose one fix to the flow. Change nothing until they agree.`,
-      `If they agree, make the change with ${DRAFT}: call it with {"flow":"${name}","action":"start"} and do what it answers (the user confirms the save). Then call ${TOOL} with {"flow":"${name}","retry":true}, which takes this run up again at the failed step.`,
+      `Tell the user what failed, in plain words, and propose one fix to the flow: say exactly what you would change, and show the changed lines if it is a script. Ask them once whether to make it. Change nothing until they agree.`,
+      `If they agree, call ${DRAFT} with {"flow":"${name}","action":"start"} to see the flow as it is, then with "action":"propose", the whole flow with the fix, and "agreed":true: that saves it at once, since they already said yes. Do not ask them again. Then call ${TOOL} with {"flow":"${name}","retry":true}, which takes this run up again at the failed step.`,
       `If the fix adds, removes or reorders steps, this run cannot go on with it: tell the user to start a new one with /flow run ${name}.`,
     ].join('\n')
   }
-  return `${head} It was ${run.status}. Do nothing more; /flow retry ${name} takes it up again.`
+  return `${head} It was ${run.status}. Do nothing more for it; tell the user that /flow retry ${name} takes it up again.`
 }
 
 /** The first prompt of a run (or of its retry): the session's Claude takes it from there with the tool. */
@@ -361,7 +368,7 @@ async function startRun($: EngineInterface, name: string, input: string): Promis
   const flow = (await read($, flows)).find(f => f.name === name)
   if (!flow) return `There is no flow named "${name}".`
   if (flow.error) return `"${name}" cannot run: ${flow.error}.`
-  if (active((await read($, runs))[name])) return `"${name}" is already running. /flow stop ${name} stops it.`
+  if (active((await read($, runs))[name])) return `"${name}" is already running. Stop the chat to stop it; /flow retry ${name} takes it up again.`
   const root = await rootDir($)
   const id = (await latestId($, root, name)) + 1
   const t = await $.clock.now()
@@ -379,18 +386,6 @@ async function startRun($: EngineInterface, name: string, input: string): Promis
 
 async function stopAgent($: EngineInterface, agentId: string): Promise<void> {
   await $.tool.call({ tool: 'TaskStop', task_id: agentId }).catch(() => undefined)
-}
-
-/** Marks a run stopped and stops its agents as far as the session lets a plugin. */
-async function stopRun($: EngineInterface, name: string): Promise<string> {
-  const run = (await read($, runs))[name]
-  if (!run || !active(run)) return `"${name}" is not running.`
-  const t = await $.clock.now()
-  const ids = run.tracks.flatMap(tr => (tr.status === 'running' && tr.steps[tr.at]?.status === 'running' && tr.steps[tr.at]?.agentId ? [tr.steps[tr.at]?.agentId ?? ''] : []))
-  await mutate($, name, r => halt(r, 'stopped', 'Stopped', t))
-  for (const id of ids) await stopAgent($, id)
-  await closeRun($, name)
-  return `Stopped "${name}". If the chat is still working on it, stop it there too. /flow retry ${name} takes it up again.`
 }
 
 /**
@@ -437,10 +432,19 @@ async function scripts($: EngineInterface, dir: string, json: string | null): Pr
   return out
 }
 
+/** Writes a flow and its scripts to its folder, and shows it in the pane in place of any draft. */
+async function save($: EngineInterface, dir: string, flow: Flow, files: Record<string, string>): Promise<void> {
+  for (const [path, text] of Object.entries(files)) await $.fs.write(`${dir}/${path}`, text)
+  await $.fs.write(`${dir}/flow.json`, flowJson(flow))
+  await update($, draft, () => null)
+  await loadFlows($)
+  await update($, view, () => ({ flow: flow.name }))
+}
+
 /** The draft tool: how to write the flow, the check of a proposal, and the save the person agreed to. */
-async function authoring($: EngineInterface, input: Proposal & { flow?: unknown; action?: unknown }): Promise<string> {
+async function authoring($: EngineInterface, input: Proposal & { flow?: unknown; action?: unknown; agreed?: unknown }): Promise<string> {
   const name = typeof input.flow === 'string' ? input.flow.trim() : ''
-  if (!NAME.test(name)) return `"${name}" is not a flow name: lower-case letters, digits and hyphens. Ask the user for one.`
+  if (!NAME.test(name) || VERBS.includes(name)) return `"${name}" is not a flow name: lower-case letters, digits and hyphens, and none of ${VERBS.join(', ')}. Ask the user for one.`
   const dir = flowDir(await rootDir($), name)
   const json = await $.fs.read(`${dir}/flow.json`).catch(() => null)
   const mode: Draft['mode'] = json === null ? 'new' : 'edit'
@@ -453,17 +457,18 @@ async function authoring($: EngineInterface, input: Proposal & { flow?: unknown;
   if (input.action === 'propose') {
     const checked = check(name, input, Object.keys(await scripts($, dir, json)))
     if ('error' in checked) return `Not accepted: ${checked.error} Fix it and propose the whole flow again.`
+    if (input.agreed === true) {
+      // The person said yes to this very change (a fix after a failed run): no draft, no second question.
+      await save($, dir, checked.flow, checked.files)
+      return `Saved the change to "${name}". Tell the user in one line what changed.`
+    }
     await update($, draft, () => ({ name, mode, ask, flow: checked.flow, files: checked.files }))
     await $.ui.open({ id: PANE, title: 'Flows' }).catch(() => undefined)
     return presented(DRAFT, checked.flow, checked.files)
   }
   if (input.action === 'save') {
     if (have?.name !== name || !have.flow) return `There is no draft of "${name}" to save: propose it first.`
-    for (const [path, text] of Object.entries(have.files)) await $.fs.write(`${dir}/${path}`, text)
-    await $.fs.write(`${dir}/flow.json`, flowJson(have.flow))
-    await update($, draft, () => null)
-    await loadFlows($)
-    await update($, view, () => ({ flow: name }))
+    await save($, dir, have.flow, have.files)
     return `Saved "${name}" in ${dir}. Tell the user so in one line, and that /flow run ${name} [input] runs it.`
   }
   if (input.action === 'discard') {
@@ -532,7 +537,7 @@ function pane(ui: Ui, list: Flow[], all: Record<string, Run>, v: View, t: number
   if (!flow) return <Text>No flows yet</Text>
   const name = flow.name
   const DRAFTED = 'Draft, not saved yet: answer in the chat.'
-  // An earlier run, when /flow show asked for one; else the newest. A draft has none.
+  // An earlier run, when /flow <name> <run> asked for one; else the newest. A draft has none.
   const isPast = !isDraft && v.run !== undefined && old?.flow === name && old.id === v.run
   const run = isDraft ? undefined : isPast && old ? old : all[name]
   const steps = run?.steps ?? flow.steps
@@ -543,8 +548,8 @@ function pane(ui: Ui, list: Flow[], all: Record<string, Run>, v: View, t: number
   const others = list.filter(f => f.name !== name)
   const foot = (
     <Box flexDirection="column">
-      {others.length > 0 && <Text dimColor>{`Other flows: ${others.map(f => `${f.name}${active(all[f.name]) ? ` (${all[f.name]?.status})` : ''}`).join(', ')} · /flow show <name>`}</Text>}
-      {!isDraft && <Text dimColor>{`/flow run ${name} [input] · /flow stop ${name} · /flow retry ${name} · /flow show ${name} <run> · /flow edit ${name} <what to change>`}</Text>}
+      {others.length > 0 && <Text dimColor>{`Other flows: ${others.map(f => `${f.name}${active(all[f.name]) ? ` (${all[f.name]?.status})` : ''}`).join(', ')} · /flow <name>`}</Text>}
+      {!isDraft && <Text dimColor>{`/flow run ${name} [input] · /flow retry ${name} · /flow ${name} <run> · /flow edit ${name} <what to change>`}</Text>}
     </Box>
   )
 
@@ -672,7 +677,7 @@ export const register: Register = on => {
       const id = `${await $.session.id().catch(() => 'session')}:${await $.clock.now()}`
       await update($, me, () => id)
     }
-    await $.command.register({ name: 'flow', description: 'Flows: open the pane, or write, change, run, stop and take up a flow', argumentHint: '[new <name> <what> | edit <name> <what> | run <name> [input] | stop <name> | retry <name> | show <name> [run]]' }).catch(() => undefined)
+    await $.command.register({ name: 'flow', description: 'Flows: open the pane, or write, change, run and take up a flow', argumentHint: '[new <name> <what> | edit <name> <what> | run <name> [input] | retry <name> | <name> [run]]' }).catch(() => undefined)
     await $.tool
       .register({
         name: 'next',
@@ -709,6 +714,7 @@ export const register: Register = on => {
             cwd: { type: 'string', description: 'With "propose", optional: a folder on this computer the agents may also write in.' },
             steps: { type: 'array', items: { type: 'object' }, description: 'With "propose": the steps, in order, as the answer to "start" describes them.' },
             files: { type: 'object', additionalProperties: { type: 'string' }, description: 'With "propose": the code of each code step, by its path in the flow\'s folder.' },
+            agreed: { type: 'boolean', description: 'With "propose", true only when the user has already said yes to exactly this change (a fix they approved after a failed run): the flow is then saved at once, with no draft and no second question.' },
           },
           required: ['flow', 'action'],
         },
@@ -735,29 +741,29 @@ export const register: Register = on => {
       await $.ui.open({ id: PANE, title: 'Flows' }).catch(() => undefined)
       return { text: verb === 'run' ? await startRun($, name, rest.join(' ')) : await retryRun($, name) }
     }
-    if (verb === 'stop' && name) return { text: await stopRun($, name) }
-    if (verb === 'show' && name) {
-      if (!(await read($, flows)).some(f => f.name === name)) return { text: `There is no flow named "${name}".` }
+    // Any other first word is a flow to show, with one of its earlier runs when a number follows.
+    if (!VERBS.includes(verb)) {
+      if (!(await read($, flows)).some(f => f.name === verb)) return { text: `There is no flow named "${verb}". ${USAGE}` }
       await $.ui.open({ id: PANE, title: 'Flows' }).catch(() => undefined)
-      if (!rest[0]) {
-        await update($, view, () => ({ flow: name }))
-        return { text: `Showing "${name}".` }
+      if (!name) {
+        await update($, view, () => ({ flow: verb }))
+        return { text: `Showing "${verb}".` }
       }
       // An earlier run, read from its folder.
-      const id = Number(rest[0])
+      const id = Number(name)
       const root = await rootDir($)
-      const text = Number.isInteger(id) && id > 0 ? await $.fs.read(`${runDir(root, name, id)}/run.json`).catch(() => null) : null
+      const text = Number.isInteger(id) && id > 0 ? await $.fs.read(`${runDir(root, verb, id)}/run.json`).catch(() => null) : null
       if (text === null) {
-        const ids = (await $.fs.list(`${flowDir(root, name)}/runs`).catch(() => [])).filter(d => d.kind === 'dir' && /^\d+$/.test(d.name)).map(d => Number(d.name)).sort((x, y) => x - y)
-        return { text: ids.length ? `"${name}" has no run ${rest[0]}. Its runs: ${ids.join(', ')}.` : `"${name}" has not run yet.` }
+        const ids = (await $.fs.list(`${flowDir(root, verb)}/runs`).catch(() => [])).filter(d => d.kind === 'dir' && /^\d+$/.test(d.name)).map(d => Number(d.name)).sort((x, y) => x - y)
+        return { text: ids.length ? `"${verb}" has no run ${name}. Its runs: ${ids.join(', ')}.` : `"${verb}" has not run yet.` }
       }
       const run = JSON.parse(text) as Run
       await update($, past, () => run)
-      await update($, view, () => ({ flow: name, run: id }))
-      return { text: `Showing run ${id} of "${name}". /flow show ${name} goes back to the newest.` }
+      await update($, view, () => ({ flow: verb, run: id }))
+      return { text: `Showing run ${id} of "${verb}". /flow ${verb} goes back to the newest.` }
     }
     if (verb === 'new' || verb === 'edit') {
-      if (!NAME.test(name)) return { text: `Usage: /flow ${verb} <name> <${verb === 'new' ? 'what it should do' : 'what to change'}>. The name takes lower-case letters, digits and hyphens.` }
+      if (!NAME.test(name) || VERBS.includes(name)) return { text: `Usage: /flow ${verb} <name> <${verb === 'new' ? 'what it should do' : 'what to change'}>. The name takes lower-case letters, digits and hyphens, and is none of: ${VERBS.join(', ')}.` }
       const exists = (await read($, flows)).some(f => f.name === name)
       if (verb === 'new' && exists) return { text: `There is already a flow named "${name}". /flow edit ${name} <what to change> changes it.` }
       if (verb === 'edit' && !exists) return { text: `There is no flow named "${name}". /flow new ${name} <what it should do> writes one.` }
@@ -767,7 +773,7 @@ export const register: Register = on => {
       kick($, `${verb === 'new' ? 'Help me write a new saved flow' : 'Help me change my saved flow'} called "${name}": call the ${DRAFT} tool with {"flow":"${name}","action":"start"} and do what it answers.`)
       return { text: verb === 'new' ? `Writing "${name}" with you in the chat.` : `Changing "${name}" with you in the chat.` }
     }
-    return { text: 'Usage: /flow · /flow new <name> <what it should do> · /flow edit <name> <what to change> · /flow run <name> [input] · /flow stop <name> · /flow retry <name> · /flow show <name> [run]' }
+    return { text: USAGE }
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => pane($.ui.resolve(e), await read($, flows), await read($, runs), await read($, view), await read($, now), e.surface === 'desktop', e.props.bodyColumns ?? 0, await read($, limit), await read($, past), await read($, draft)))
@@ -776,6 +782,7 @@ export const register: Register = on => {
   on('tool.call', { tool: TOOL }, async ($, e) => {
     const input = e as { flow?: unknown; answer?: unknown; note?: unknown; retry?: unknown }
     const name = typeof input.flow === 'string' ? input.flow : ''
+    if (mainTurn) turnOf.set(name, mainTurn)
     if (input.retry === true) {
       await loadFlows($)
       const why = await takeUp($, name)
@@ -790,7 +797,7 @@ export const register: Register = on => {
   }).catch(() => ({ result: `Flows could not work out the next step. Tell the user, and do nothing more for this flow.` }))
 
   // The session's Claude writes or changes a flow with the person.
-  on('tool.call', { tool: DRAFT }, async ($, e) => ({ result: await authoring($, e as Proposal & { flow?: unknown; action?: unknown }) })).catch(() => ({ result: 'Flows could not handle the draft. Tell the user, and do nothing more with it.' }))
+  on('tool.call', { tool: DRAFT }, async ($, e) => ({ result: await authoring($, e as Proposal & { flow?: unknown; action?: unknown; agreed?: unknown }) })).catch(() => ({ result: 'Flows could not handle the draft. Tell the user, and do nothing more with it.' }))
 
   // The session's Claude starts a step's agent: the step's real task and folder go in here, so what one
   // step hands the next never passes through the chat. An agent that is no step waiting to start is refused.
@@ -819,11 +826,30 @@ export const register: Register = on => {
     return spawn
   }).catch(($, e, next) => next(e))
 
+  // Which of the session's own turns is running: the one a flow is being run in, when the person stops it, stops the flow.
+  on('turn.start', ($, e, next) => {
+    mainTurn = e.turnId
+    return next(e)
+  })
+
   // A flow step's agent ended its turn. Started in the foreground (the rule), its result is what its Agent
   // call returns, a moment later: the session has it hand its report back through a tool, and its last
   // message may be about anything. Started in the background, its last message is the result.
   on('turn.complete', async ($, e, next) => {
     const out = await next(e)
+    if (!e.agentId) {
+      if (e.turnId === mainTurn) mainTurn = undefined
+      // The person stopped the chat: the flows it was running stop there, to be taken up with /flow retry.
+      const t = await $.clock.now()
+      for (const [name, turn] of [...turnOf]) {
+        if (turn !== e.turnId) continue
+        turnOf.delete(name)
+        if (e.isAborted && active((await read($, runs))[name])) {
+          await mutate($, name, r => halt(r, 'stopped', 'Stopped', t))
+          await closeRun($, name)
+        }
+      }
+    }
     if (e.agentId && known.has(e.agentId)) {
       const u = e.usage
       const tokens = u ? u.input_tokens + u.output_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens : 0
