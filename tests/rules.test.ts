@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { claim, complete, finish, halt, inside, itemsOf, newRun, parseFlow, retry, sendBack, settle } from '../hooks/flow'
+import { claim, finish, halt, inside, itemsOf, newRun, parseFlow, retry, sendBack, settle } from '../hooks/flow'
 
 const flow = (steps: unknown[]) => parseFlow('demo', JSON.stringify({ description: 'd', steps }))
 
@@ -50,23 +50,4 @@ test('send back returns to the agent before the approval, with the note', async 
   expect(d?.tracks[0]?.at).toBe(0)
   expect(d?.tracks[0]?.steps[0]).toEqual({ status: 'pending', note: 'shorter', tokens: 5 })
   expect(d?.tracks[0]?.steps[1]).toBeUndefined()
-})
-
-test('the typeahead offers the commands after /flows, and the flows where a name goes', async () => {
-  const flows = [{ name: 'resumo-site', description: 'Summarises a page.' }, { name: 'test-facts', description: 'Three facts.' }]
-  // The word being typed is the run of characters that ends at the cursor, here the end of the draft.
-  const rows = (text: string): string[] => {
-    const start = text.search(/\S*$/)
-    return complete(text, text.slice(start), start, flows).map(r => r.text)
-  }
-  expect(rows('/flows')).toEqual(['/flows list', '/flows new ', '/flows edit ', '/flows run ', '/flows retry ', '/flows delete '])
-  expect(rows('/flo')).toEqual([])
-  expect(rows('/flows r')).toEqual(['run ', 'retry ', 'resumo-site'])
-  expect(rows('/flows list')).toEqual([])
-  expect(rows('/flows run t')).toEqual(['test-facts'])
-  expect(rows('/flows run test-facts')).toEqual([])
-  expect(rows('/flows run test-facts v')).toEqual([])
-  expect(rows('/flows new t')).toEqual([])
-  expect(rows('what does /flows r')).toEqual([])
-  expect(complete('/flows', '/flows', 0, flows)[3]).toEqual({ text: '/flows run ', label: '/flows run', description: 'Runs a flow: <name> [input]' })
 })

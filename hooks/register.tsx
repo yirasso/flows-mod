@@ -10,7 +10,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Draft, Flow, FlowStep, Run, StepRun, Track, View } from '../types'
 import { check, flowJson, guide, presented, sameShape } from './author'
 import type { Proposal } from './author'
-import { BASE_TOOLS, COMMANDS, NAME, READ_TOOLS, WRITE_TOOLS, agentBefore, agentStep, claim, complete, finish, flowDir, halt, inFile, inside, itemsOf, labelOf, newRun, outFile, parseFlow, pending, promote, resultFile, retry, runDir, sendBack, settle, split, tokensOf } from './flow'
+import { BASE_TOOLS, NAME, READ_TOOLS, WRITE_TOOLS, agentBefore, agentStep, claim, finish, flowDir, halt, inFile, inside, itemsOf, labelOf, newRun, outFile, parseFlow, pending, promote, resultFile, retry, runDir, sendBack, settle, split, tokensOf } from './flow'
 import type { Outcome } from './flow'
 import { header as drawHeader, item as drawItem, row as drawRow } from './draw'
 import type { Tone } from './draw'
@@ -32,7 +32,7 @@ const draft = atom({ plugin: 'flows', key: 'draft' } as const, null)
 
 /** How often the timer looks at the flows folder, the time limits and the heartbeat. */
 /** The first words of /flows that are not a flow's name; a flow cannot be called by one. */
-const VERBS = Object.keys(COMMANDS)
+const VERBS = ['list', 'new', 'edit', 'run', 'retry', 'delete']
 const USAGE = 'Usage: /flows · /flows list · /flows <name> [run] · /flows new <name> <what it should do> · /flows edit <name> <what to change> · /flows run <name> [input] · /flows retry <name> · /flows delete <name>'
 
 const TICK = 5000
@@ -743,13 +743,6 @@ export const register: Register = on => {
     const week = e.changed.includes('rateLimits') ? e.rateLimits.find(l => l.kind === 'seven_day')?.percentUsed : undefined
     if (week !== undefined) await update($, limit, () => week)
     return next(e)
-  })
-
-  // The typeahead: what may follow /flows, and the project's flows where a name goes.
-  on('prompt.autocomplete', async ($, e, next) => {
-    const rest = await next(e)
-    if (!e.text.startsWith('/flows')) return rest
-    return { suggestions: [...complete(e.text, e.token, e.start, await read($, flows)), ...rest.suggestions] }
   })
 
   on('command.run', { command: 'flows' }, async ($, e) => {

@@ -74,8 +74,6 @@ Every agent step is a pixel crab in the costume of its role, and it moves while 
 
 A name takes lower-case letters, digits and hyphens.
 
-The prompt box completes them: type `/flows` to see every command, and the first letters of a flow's name where one goes.
-
 ## The pane
 
 The pane only shows; everything is done from the chat. From top to bottom: the flow and its run, three tiles (what the run took of your weekly limit, its tokens, its time), the weekly limit, and one row per step with its state, its time and tokens, and the first line of its result. The items of a for-each sit under their step. In a terminal the pane is text.
