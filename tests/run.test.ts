@@ -2,7 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 
 import type { Run } from '../types'
 
-const ROOT = 'C:/U/Flows'
+const ROOT = 'C:/P/Flows'
 const FLOW = {
   description: 'A test flow',
   steps: [
@@ -29,7 +29,8 @@ test('the session\'s Claude runs a flow through the next tool: agents, code, an 
   const spawned: { id: string; prompt: string; type: string; description: string; cwd: string }[] = []
   const ran: { argv: readonly string[]; stdin: string }[] = []
   const prompts: string[] = []
-  mock.env(on, { USERPROFILE: 'C:\\U' })
+  // The session's folder is the project; its flows are in its Flows folder.
+  on('session.cwd', async () => ({ value: 'C:\\P' }) as never)
   const time = mock.clock(on)
   on('fs.read', async (_$: unknown, e: { path: string }) => {
     const text = files.get(slash(e.path))
@@ -102,7 +103,8 @@ test('the session\'s Claude runs a flow through the next tool: agents, code, an 
   await start(told, 'three facts')
   expect(spawned[0]?.prompt).toContain('Find facts about the input.')
   expect(spawned[0]?.prompt).toContain('volcanoes')
-  expect(spawned[0]?.cwd).toBe(`${ROOT}/demo/runs/1`)
+  // The agent works in the project.
+  expect(spawned[0]?.cwd).toBe('C:/P')
 
   // An agent that is no step waiting to start is refused.
   expect(((await $.agent.spawn({ subagentType: 'flows:demo-research', description: 'demo #1 [0.0] Research', prompt: 'x' } as never)) as { deny?: string }).deny).toContain('not a step waiting')

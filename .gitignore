@@ -2,3 +2,5 @@
 node_modules/
 graphify-out/
 preview.png
+/Flows/
+*.graphify-bak

@@ -5,7 +5,7 @@ Flows is a Claude Code plugin (a mod of function hooks) that runs saved multi-st
 ## What a flow is
 
 - A saved, repeatable automation. Each time it runs is a run.
-- Flows live outside this repository, in `~/Flows/<name>/`:
+- **A flow belongs to a project** (Tomás, 10 Oct 2026; before that they were kept in one global folder, `~/Flows`). It lives in the folder of the session, in `Flows/<name>/`, and its agents work in that project. To use a flow in another project, its folder is copied there. A session with no folder has no flows, and the commands say why. Not under `.claude`, where the session asks the person before every write. In `Flows/<name>/`:
   - `flow.json`: the description and the steps;
   - the code steps' files (for example `steps/2-filter.js`);
   - `runs/<n>/`: one folder per run, with `run.json` and each step's output in `out/`.
@@ -59,7 +59,7 @@ A flow is a plain list, top to bottom. Each step receives what the one before ha
   - `propose` sends the whole flow. The plugin checks it (`hooks/author.ts`) and shows it in the pane as a draft; a fault goes back to Claude in words;
   - Claude then tells the person the steps, what it assumed and left out, shows the code of any script, and asks: Save, Change something, or Discard;
   - `save` writes `flow.json` and the scripts; `discard` drops the draft. Nothing is saved before the person says so.
-- `/flow run <name> [input]`, `/flow retry <name>`, and `/flow <name> [run]`, which shows a flow in the pane, or one of its earlier runs (Tomás, 10 Oct 2026: no `show` word). A flow cannot be named new, edit, run or retry.
+- `/flow run <name> [input]`, `/flow retry <name>`, and `/flow <name> [run]`, which shows a flow in the pane, or one of its earlier runs (Tomás, 10 Oct 2026: no `show` word). `/flow list` lists the project's flows in the chat. `/flow delete <name>` says what would go (the steps, the scripts, the runs) and deletes only when typed again with `yes`; nothing brings a deleted flow back. A flow cannot be named list, new, edit, run, retry or delete.
 - **Stopping a flow is stopping the chat** (Tomás, 10 Oct 2026: a `/flow stop` command was built and dropped, since a command typed while the chat works waits for the turn to end). The run shows as stopped, and `/flow retry` takes it up again.
 - **When a run fails:** the tool tells Claude to say what failed and propose one fix, and to change nothing until the person agrees. The person is asked once: their yes to the fix is the yes to saving it (Tomás, 10 Oct 2026: a second "save?" question was built and dropped). Claude proposes the fixed flow with `agreed: true`, which saves it at once, and `mcp__flows__next` with `retry: true` takes the run up again at the failed step. A run goes on with a changed flow only if its steps are still the same ones (same ids and types, in order); otherwise it needs a new run.
 
@@ -84,5 +84,5 @@ A flow is a plain list, top to bottom. Each step receives what the one before ha
 
 - `hooks/flow.ts` holds the rules of a flow and a run, `hooks/author.ts` what Claude is told when writing a flow and the check of a proposal, `hooks/draw.ts` the pane's drawings: none has the engine in it. `hooks/register.tsx` has the hooks, the tools, the commands and the pane; `types/index.d.ts` the state contract.
 - Check a change with `claude plugin validate .`, `claude plugin test .` and a typecheck. The `claude` binary is under `%APPDATA%\Claude\claude-code\<version>\<hash>\claude.exe`.
-- The plugin is installed from this folder (`flows@flows-local`): an edit counts after `/reload-plugins`.
+- The plugin is installed from this folder (`flows@flows-mod`, the marketplace pointing at `C:DevFlows`): an edit counts after `/reload-plugins`.
 - In tests, the engine hands paths over with backslashes on Windows. A command's hook may not call `$.prompt.submit` (it holds the turn): the kickoff goes out from a timer.

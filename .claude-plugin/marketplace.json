@@ -1,6 +1,13 @@
 {
-  "name": "flows-local",
-  "owner": { "name": "Tomas Girao" },
-  "metadata": { "description": "The Flows plugin, read from its own folder." },
-  "plugins": [{ "name": "flows", "source": "./", "description": "Saved multi-step AI flows that run from a pane inside Claude Code." }]
+  "name": "flows-mod",
+  "owner": {
+    "name": "Tomas Girao"
+  },
+  "plugins": [
+    {
+      "name": "flows",
+      "source": "./",
+      "description": "Saved, repeatable AI flows: agents, Node scripts, approvals and a for-each, written in the chat, run with one command and shown in a pane."
+    }
+  ]
 }

@@ -1,8 +1,22 @@
 {
   "name": "flows",
-  "version": "0.1.0",
-  "description": "Saved multi-step AI flows (agents, code, approvals, for-each) that run from a pane inside Claude Code.",
-  "author": { "name": "Tomas Girao" },
+  "version": "0.2.0",
+  "description": "Saved, repeatable AI flows for Claude Code: agents, Node scripts, approvals and a for-each, written with you in the chat, run with one command and shown step by step in a pane.",
+  "author": {
+    "name": "Tomas Girao"
+  },
+  "homepage": "https://github.com/yirasso/flows-mod",
+  "repository": "https://github.com/yirasso/flows-mod",
   "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "plugin",
+    "automation",
+    "workflows",
+    "agents",
+    "subagents",
+    "approvals",
+    "productivity"
+  ],
   "types": "./types/index.d.ts"
 }

@@ -2,7 +2,7 @@
 // each run's state and decides the next step; the session's own Claude carries it out: it calls the tool
 // `next`, starts the agents the answer names and puts the approvals to the person in the chat. That way a
 // flow runs under the session's permission mode like any other work (a plugin's own spawn is refused in
-// auto mode). The flows live in ~/Flows/<name>/; flow.ts holds the rules.
+// auto mode). A project's flows live in its own Flows folder, <project>/Flows/<name>/; flow.ts holds the rules.
 
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
@@ -32,8 +32,8 @@ const draft = atom({ plugin: 'flows', key: 'draft' } as const, null)
 
 /** How often the timer looks at the flows folder, the time limits and the heartbeat. */
 /** The first words of /flow that are not a flow's name; a flow cannot be called by one. */
-const VERBS = ['new', 'edit', 'run', 'retry']
-const USAGE = 'Usage: /flow · /flow <name> [run] · /flow new <name> <what it should do> · /flow edit <name> <what to change> · /flow run <name> [input] · /flow retry <name>'
+const VERBS = ['list', 'new', 'edit', 'run', 'retry', 'delete']
+const USAGE = 'Usage: /flow · /flow list · /flow <name> [run] · /flow new <name> <what it should do> · /flow edit <name> <what to change> · /flow run <name> [input] · /flow retry <name> · /flow delete <name>'
 
 const TICK = 5000
 /** A run whose session has not said it is alive for this long was interrupted. */
@@ -54,11 +54,22 @@ const turnOf = new Map<string, string>()
 
 // ——— The flows folder ———
 
-async function rootDir($: EngineInterface): Promise<string> {
-  const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? ''
-  // Not under ~/.claude: the session treats every file there as sensitive and asks the person before each write.
-  return `${home.replace(/\\/g, '/')}/Flows`
+/** The session's folder, the project the flows belong to; empty when the session has none. */
+async function projectDir($: EngineInterface): Promise<string> {
+  return ((await $.session.cwd().catch(() => '')) ?? '').replace(/\\/g, '/').replace(/\/+$/, '')
 }
+
+/**
+ * Where this project's flows are kept: its Flows folder (Tomás, 10 Oct 2026: a flow belongs to the project
+ * it works on; to use one elsewhere, copy its folder). Not under .claude, where the session asks the person
+ * before every write.
+ */
+async function rootDir($: EngineInterface): Promise<string> {
+  const project = await projectDir($)
+  return project ? `${project}/Flows` : ''
+}
+
+const NO_FOLDER = 'This session has no folder, and a flow lives in the Flows folder of its project. Open a session in a project to use flows.'
 
 /** The newest run id in a flow's folder; 0 with none. */
 async function latestId($: EngineInterface, root: string, name: string): Promise<number> {
@@ -71,7 +82,7 @@ async function loadFlows($: EngineInterface): Promise<void> {
   const root = await rootDir($)
   const mine = await read($, me)
   const t = await $.clock.now()
-  const dirs = (await $.fs.list(root).catch(() => [])).filter(d => d.kind === 'dir' && NAME.test(d.name)).map(d => d.name).sort()
+  const dirs = (root ? await $.fs.list(root).catch(() => []) : []).filter(d => d.kind === 'dir' && NAME.test(d.name)).map(d => d.name).sort()
   const list: Flow[] = []
   const fromDisk: Record<string, Run> = {}
   for (const name of dirs) {
@@ -182,7 +193,7 @@ async function agentPrompt($: EngineInterface, run: Run, track: number, step: nu
   return [
     `Task:\n${spec?.instruction ?? ''}`,
     ...(run.tracks[track]?.item !== undefined ? [`This run handles one item of a list (item ${track} of ${run.tracks.length - 1}).`] : []),
-    `Folders you may write in: ${dir} (this run's folder)${run.cwd ? ` and ${run.cwd} (the flow's working folder)` : ''}.`,
+    `Folders you may write in: ${dir} (this run's folder)${run.cwd ? ` and ${run.cwd} (the project the flow works on)` : ''}.`,
     `Result file (write your result here, and only your result): ${resultFile(dir, track, step, token)}`,
     `Input:\n${input || '(none)'}`,
     ...(note !== undefined ? [`You did this before and the reviewer sent it back with this note:\n${note}\n\nYour previous result:\n${before}`] : []),
@@ -375,7 +386,7 @@ async function startRun($: EngineInterface, name: string, input: string): Promis
   await registerTypes($, flow)
   await $.fs.write(`${runDir(root, name, id)}/out/input.txt`, input)
   void prune($, root, name, id).catch(() => undefined)
-  const run = newRun(flow, id, input, t, await read($, me), await weekUsed($))
+  const run = newRun({ ...flow, cwd: flow.cwd ?? (await projectDir($)) }, id, input, t, await read($, me), await weekUsed($))
   await update($, runs, all => ({ ...all, [name]: run }))
   await update($, view, () => ({ flow: name }))
   await saveRun($, name)
@@ -444,6 +455,7 @@ async function save($: EngineInterface, dir: string, flow: Flow, files: Record<s
 /** The draft tool: how to write the flow, the check of a proposal, and the save the person agreed to. */
 async function authoring($: EngineInterface, input: Proposal & { flow?: unknown; action?: unknown; agreed?: unknown }): Promise<string> {
   const name = typeof input.flow === 'string' ? input.flow.trim() : ''
+  if (!(await rootDir($))) return `${NO_FOLDER} Tell the user so.`
   if (!NAME.test(name) || VERBS.includes(name)) return `"${name}" is not a flow name: lower-case letters, digits and hyphens, and none of ${VERBS.join(', ')}. Ask the user for one.`
   const dir = flowDir(await rootDir($), name)
   const json = await $.fs.read(`${dir}/flow.json`).catch(() => null)
@@ -529,7 +541,7 @@ function pane(ui: Ui, list: Flow[], all: Record<string, Run>, v: View, t: number
     return (
       <Box flexDirection="column">
         <Text bold>No flows yet</Text>
-        <Text dimColor>A flow is a folder in ~/Flows/ with a flow.json. Ask Claude to write one.</Text>
+        <Text dimColor>This project has no flows yet. /flow new &lt;name&gt; &lt;what it should do&gt; writes one, in its Flows folder.</Text>
       </Box>
     )
   }
@@ -677,7 +689,7 @@ export const register: Register = on => {
       const id = `${await $.session.id().catch(() => 'session')}:${await $.clock.now()}`
       await update($, me, () => id)
     }
-    await $.command.register({ name: 'flow', description: 'Flows: open the pane, or write, change, run and take up a flow', argumentHint: '[new <name> <what> | edit <name> <what> | run <name> [input] | retry <name> | <name> [run]]' }).catch(() => undefined)
+    await $.command.register({ name: 'flow', description: 'Flows: open the pane, or write, change, run and take up a flow', argumentHint: '[list | new <name> <what> | edit <name> <what> | run <name> [input] | retry <name> | delete <name> | <name> [run]]' }).catch(() => undefined)
     await $.tool
       .register({
         name: 'next',
@@ -736,7 +748,33 @@ export const register: Register = on => {
   on('command.run', { command: 'flow' }, async ($, e) => {
     const [verb = '', name = '', ...rest] = e.args.trim().split(/\s+/)
     if (!verb) return { text: await togglePane($) }
+    if (!(await rootDir($))) return { text: NO_FOLDER }
     await loadFlows($)
+    if (verb === 'list') {
+      const list = await read($, flows)
+      const all = await read($, runs)
+      if (list.length === 0) return { text: `This project has no flows yet. /flow new <name> <what it should do> writes one, in ${await rootDir($)}.` }
+      // One line a flow: what it does, how long it is, and how its last run went.
+      const lines = list.map(f => {
+        const run = all[f.name]
+        const last = f.error ? `cannot run: ${f.error}` : run ? `run ${run.id} ${run.status}` : 'not run yet'
+        return `${f.name}: ${f.description || '(no description)'} (${f.steps.length} step${f.steps.length === 1 ? '' : 's'} · ${last})`
+      })
+      return { text: [`${list.length} flow${list.length === 1 ? '' : 's'} in ${await rootDir($)}:`, ...lines].join('\n') }
+    }
+    if (verb === 'delete') {
+      const flow = (await read($, flows)).find(f => f.name === name)
+      if (!flow) return { text: name ? `There is no flow named "${name}".` : 'Usage: /flow delete <name>' }
+      if (active((await read($, runs))[name])) return { text: `"${name}" is running. Stop the chat first, then delete it.` }
+      const dir = flowDir(await rootDir($), name)
+      const kept = (await $.fs.list(`${dir}/runs`).catch(() => [])).filter(d => d.kind === 'dir').length
+      // Nothing brings a deleted flow back, so the command is typed twice: once to see what goes, once with "yes".
+      if (rest[0] !== 'yes') return { text: `This deletes the flow "${name}" for good: its ${flow.steps.length} step${flow.steps.length === 1 ? '' : 's'}, its scripts and its ${kept} run${kept === 1 ? '' : 's'}, in ${dir}. To go ahead: /flow delete ${name} yes` }
+      const gone = await $.process.run(['node', '-e', 'require("fs").rmSync(process.argv[1],{recursive:true,force:true})', dir]).catch(() => null)
+      await loadFlows($)
+      const left = (await read($, flows)).some(f => f.name === name)
+      return { text: left || gone?.exitCode !== 0 ? `"${name}" could not be deleted. Its folder is ${dir}.` : `Deleted "${name}".` }
+    }
     if ((verb === 'run' || verb === 'retry') && name) {
       await $.ui.open({ id: PANE, title: 'Flows' }).catch(() => undefined)
       return { text: verb === 'run' ? await startRun($, name, rest.join(' ')) : await retryRun($, name) }

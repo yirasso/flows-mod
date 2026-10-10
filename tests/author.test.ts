@@ -2,7 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 
 import { check, sameShape } from '../hooks/author'
 
-const ROOT = 'C:/U/Flows'
+const ROOT = 'C:/P/Flows'
 const slash = (path: string): string => path.replace(/\\/g, '/')
 const until = async (done: () => boolean): Promise<void> => {
   for (let i = 0; i < 50_000 && !done(); i++) await Promise.resolve()
@@ -40,7 +40,8 @@ test('/flow new and /flow edit: the tool explains, checks the proposal, shows th
   // The test stands in for the engine (files in memory) and for the session's Claude (it calls the tool).
   const files = new Map<string, string>()
   const prompts: string[] = []
-  mock.env(on, { USERPROFILE: 'C:\\U' })
+  // The session's folder is the project; its flows are in its Flows folder.
+  on('session.cwd', async () => ({ value: 'C:\\P' }) as never)
   const time = mock.clock(on)
   on('fs.read', async (_$: unknown, e: { path: string }) => {
     const text = files.get(slash(e.path))
@@ -58,6 +59,12 @@ test('/flow new and /flow edit: the tool explains, checks the proposal, shows th
     }
     return { value: [...names].map(([name, kind]) => ({ name, kind, size: 0, mtimeMs: 0, isLink: false })) }
   })
+  // Deleting a flow's folder is a process the plugin runs: here it takes the folder's files out of memory.
+  on('process.run', async (_$: unknown, e: { argv: readonly string[] }) => {
+    const dir = slash(e.argv[e.argv.length - 1] ?? '')
+    for (const path of [...files.keys()]) if (path.startsWith(`${dir}/`)) files.delete(path)
+    return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
   on('ui.open', async () => ({ value: { isPlaced: true } }) as never)
   on('command.register', async () => ({ value: undefined }) as never)
   on('prompt.submit', async (_$: unknown, e: { text: string }) => (prompts.push(e.text), { text: e.text }) as never)
@@ -72,6 +79,7 @@ test('/flow new and /flow edit: the tool explains, checks the proposal, shows th
   }
 
   // /flow new hands the chat a prompt; the tool then says how to write the flow, with what was asked.
+  expect(await run('list')).toContain('no flows yet')
   expect(await run('new Hello World greet someone')).toContain('Usage')
   expect(await run('new hello greet someone by name')).toContain('Writing "hello"')
   await time.advance(100)
@@ -96,6 +104,9 @@ test('/flow new and /flow edit: the tool explains, checks the proposal, shows th
   expect(files.get(`${ROOT}/hello/steps/shout.js`)).toContain('process.stdin')
   expect(await shown()).not.toContain('Draft, not saved yet')
   expect(await draft({ action: 'save' })).toContain('no draft')
+  // /flow list names every flow of the project, with what it does and how its last run went.
+  expect(await run('list')).toContain('hello: Greets someone, loudly. (2 steps · not run yet)')
+  expect(await run('new list a flow named after a command')).toContain('none of')
 
   // The name is taken now; /flow edit shows the tool the flow as it is, scripts included.
   expect(await run('new hello again')).toContain('already a flow named')
@@ -114,4 +125,13 @@ test('/flow new and /flow edit: the tool explains, checks the proposal, shows th
   expect(await draft({ action: 'propose', agreed: true, description: 'Greets someone, softly.', steps: [AGENT, CODE] })).toContain('Saved the change')
   expect(files.get(`${ROOT}/hello/flow.json`)).toContain('softly')
   expect(await shown()).not.toContain('Draft, not saved yet')
+
+  // /flow delete says what goes and deletes nothing until it is typed again with "yes".
+  expect(await run('delete nope')).toContain('no flow named')
+  expect(await run('delete hello')).toContain('/flow delete hello yes')
+  expect(files.has(`${ROOT}/hello/flow.json`)).toBe(true)
+  expect(await run('delete hello yes')).toBe('Deleted "hello".')
+  expect(files.has(`${ROOT}/hello/flow.json`)).toBe(false)
+  expect(files.has(`${ROOT}/hello/steps/shout.js`)).toBe(false)
+  expect(await run('list')).toContain('no flows yet')
 })
