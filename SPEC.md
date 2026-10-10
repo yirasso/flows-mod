@@ -30,14 +30,14 @@ A flow is a plain list, top to bottom. Each step receives what the one before ha
 
 ## How it runs
 
-- **The plugin decides, the session's Claude carries out** (changed 10 Oct 2026, after two failed tries with the plugin starting the agents itself). `/flow run` hands the chat a prompt. Claude then calls the plugin's tool `mcp__flows__next`, does the one thing it answers, and calls it again, until the flow is over:
+- **The plugin decides, the session's Claude carries out** (changed 10 Oct 2026, after two failed tries with the plugin starting the agents itself). `/flows run` hands the chat a prompt. Claude then calls the plugin's tool `mcp__flows__next`, does the one thing it answers, and calls it again, until the flow is over:
   - **start agents:** Claude starts the agents the answer names, with the Agent tool, in the foreground. The plugin's `agent.spawn` hook swaps in the step's real task and folder, so what one step hands the next never passes through the chat, and it refuses any agent that is no step waiting to start;
   - **approval:** Claude shows the person what they are approving and asks them in the chat, then brings their answer back to the tool;
   - **the end:** Claude reports the result, or what failed with a proposed fix.
 - Scripts and for-each splits run inside the plugin, between two calls of the tool.
 - **Why this way:** a flow then runs under the session's permission mode like any other work, Auto included. The savvy-progress mod works the same way.
 - One run at a time per flow. Different flows run side by side.
-- A failed step stops its track. `/flow retry <name>` takes the run up at the failed step, without repeating the steps before it.
+- A failed step stops its track. `/flows retry <name>` takes the run up at the failed step, without repeating the steps before it.
 - Closing the session kills the agents. The run then shows as interrupted and can be retried.
 - The last 10 runs of each flow are kept (pruning is not built yet).
 
@@ -46,28 +46,28 @@ A flow is a plain list, top to bottom. Each step receives what the one before ha
 - **Read-only, no buttons** (Tomás, 10 Oct 2026, "for now"): everything is done from the chat, and approvals are asked there. From top to bottom: the flow, the run's status (time, tokens, week ≈ x%), the steps, and the commands.
 - Each step is one row: its character, name, description, model, effort and progress.
 - **Characters:** a pixel crab drawn from scratch as SVG, wearing the costume of the step's role, moving while it works. Eight roles: researcher, writer, builder, designer, coder, reviewer, analyst, messenger. Steps that are not agents have their own drawing. The technique follows the savvy-progress mod (MIT), which gets a thank-you in the README.
-- Each finished step shows the start of what it handed on. `/flow <name>` picks the flow.
+- Each finished step shows the start of what it handed on. `/flows <name>` picks the flow.
 - **Week %:** the weekly limit's percent used when the run ended minus when it started, shown with "≈" (other work in the same period counts too).
 - With the pane closed: a band above the prompt when a flow needs the person, and a short toast when one finishes.
 - The look follows the Claudify plugin.
 
 ## The chat
 
-- `/flow` opens and closes the pane.
-- **`/flow new <name> <what it should do>`** and **`/flow edit <name> <what to change>`** hand the chat a prompt. Claude calls the plugin's tool `mcp__flows__draft`:
+- `/flows` opens and closes the pane.
+- **`/flows new <name> <what it should do>`** and **`/flows edit <name> <what to change>`** hand the chat a prompt. Claude calls the plugin's tool `mcp__flows__draft`:
   - `start` answers how to write the flow: interview the person in rounds until at least 90% sure, what each step type is, and, for an edit, the flow as it is now with its scripts;
   - `propose` sends the whole flow. The plugin checks it (`hooks/author.ts`) and shows it in the pane as a draft; a fault goes back to Claude in words;
   - Claude then tells the person the steps, what it assumed and left out, shows the code of any script, and asks: Save, Change something, or Discard;
   - `save` writes `flow.json` and the scripts; `discard` drops the draft. Nothing is saved before the person says so.
-- `/flow run <name> [input]`, `/flow retry <name>`, and `/flow <name> [run]`, which shows a flow in the pane, or one of its earlier runs (Tomás, 10 Oct 2026: no `show` word). `/flow list` lists the project's flows in the chat. `/flow delete <name>` says what would go (the steps, the scripts, the runs) and deletes only when typed again with `yes`; nothing brings a deleted flow back. A flow cannot be named list, new, edit, run, retry or delete.
-- **Stopping a flow is stopping the chat** (Tomás, 10 Oct 2026: a `/flow stop` command was built and dropped, since a command typed while the chat works waits for the turn to end). The run shows as stopped, and `/flow retry` takes it up again.
+- `/flows run <name> [input]`, `/flows retry <name>`, and `/flows <name> [run]`, which shows a flow in the pane, or one of its earlier runs (Tomás, 10 Oct 2026: no `show` word). `/flows list` lists the project's flows in the chat. `/flows delete <name>` says what would go (the steps, the scripts, the runs) and deletes only when typed again with `yes`; nothing brings a deleted flow back. A flow cannot be named list, new, edit, run, retry or delete.
+- **Stopping a flow is stopping the chat** (Tomás, 10 Oct 2026: a `/flows stop` command was built and dropped, since a command typed while the chat works waits for the turn to end). The run shows as stopped, and `/flows retry` takes it up again.
 - **When a run fails:** the tool tells Claude to say what failed and propose one fix, and to change nothing until the person agrees. The person is asked once: their yes to the fix is the yes to saving it (Tomás, 10 Oct 2026: a second "save?" question was built and dropped). Claude proposes the fixed flow with `agreed: true`, which saves it at once, and `mcp__flows__next` with `retry: true` takes the run up again at the failed step. A run goes on with a changed flow only if its steps are still the same ones (same ids and types, in order); otherwise it needs a new run.
 
 ## Build order
 
 1. **The engine and a plain pane.** Done on 10 Oct 2026: the four step types, Run, Stop, approvals, retry, the test flow `test-facts`.
-2. **The real pane.** Done on 10 Oct 2026 in `hooks/draw.ts`: the characters and their eight costumes, the three tiles, the weekly limit bar, one drawn row per step and per item, earlier runs with `/flow <name> <run>`, and only the last 10 runs kept. Left out: the band above the prompt (approvals and failures already come to the chat) and the "3/5" inside a step.
-3. **The chat.** Done on 10 Oct 2026: `/flow new` with the interview, `/flow edit`, the draft in the pane, the failure report with a fix and the retry from the tool.
+2. **The real pane.** Done on 10 Oct 2026 in `hooks/draw.ts`: the characters and their eight costumes, the three tiles, the weekly limit bar, one drawn row per step and per item, earlier runs with `/flows <name> <run>`, and only the last 10 runs kept. Left out: the band above the prompt (approvals and failures already come to the chat) and the "3/5" inside a step.
+3. **The chat.** Done on 10 Oct 2026: `/flows new` with the interview, `/flows edit`, the draft in the pane, the failure report with a fix and the retry from the tool.
 
 ## What was tried first, and why it was dropped
 
@@ -77,7 +77,7 @@ A flow is a plain list, top to bottom. Each step receives what the one before ha
 ## Seen in a real session, and still to see
 
 - Seen (10 Oct 2026, in Auto mode): a whole run through the tool, the approval asked in the chat, the characters moving, the pane at the right width.
-- Still to see: `/flow new` with a real interview, `/flow edit`, and a failed run fixed and taken up from the chat.
+- Still to see: `/flows new` with a real interview, `/flows edit`, and a failed run fixed and taken up from the chat.
 - Not built: schedules, the band above the prompt, the "3/5" inside a step.
 
 ## For whoever works on the code

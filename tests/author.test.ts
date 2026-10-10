@@ -36,7 +36,7 @@ test('a run goes on with a changed flow only when its steps are the same ones', 
   expect(sameShape(a, [a[1], a[0]] as never)).toBe(false)
 })
 
-test('/flow new and /flow edit: the tool explains, checks the proposal, shows the draft and saves it', async ($, on) => {
+test('/flows new and /flows edit: the tool explains, checks the proposal, shows the draft and saves it', async ($, on) => {
   // The test stands in for the engine (files in memory) and for the session's Claude (it calls the tool).
   const files = new Map<string, string>()
   const prompts: string[] = []
@@ -69,7 +69,7 @@ test('/flow new and /flow edit: the tool explains, checks the proposal, shows th
   on('command.register', async () => ({ value: undefined }) as never)
   on('prompt.submit', async (_$: unknown, e: { text: string }) => (prompts.push(e.text), { text: e.text }) as never)
 
-  const run = async (args: string): Promise<string> => String(((await $.command.run({ command: 'flow', args, origin: { kind: 'user' } } as never)) as { text?: string }).text)
+  const run = async (args: string): Promise<string> => String(((await $.command.run({ command: 'flows', args, origin: { kind: 'user' } } as never)) as { text?: string }).text)
   const draft = async (more: object): Promise<string> => String((await $.tool.call({ tool: 'mcp__flows__draft', flow: 'hello', ...more } as never)).result)
   const shown = async (): Promise<string> => {
     const ui = await $.ui.mount({ plugin: 'flows', surface: 'terminal', component: 'Pane', requestId: 'flows', props: { title: 'Flows', isFocused: false } as never, viewport: { columns: 60, rows: 50 } as never })
@@ -78,7 +78,7 @@ test('/flow new and /flow edit: the tool explains, checks the proposal, shows th
     return text
   }
 
-  // /flow new hands the chat a prompt; the tool then says how to write the flow, with what was asked.
+  // /flows new hands the chat a prompt; the tool then says how to write the flow, with what was asked.
   expect(await run('list')).toContain('no flows yet')
   expect(await run('new Hello World greet someone')).toContain('Usage')
   expect(await run('new hello greet someone by name')).toContain('Writing "hello"')
@@ -104,11 +104,11 @@ test('/flow new and /flow edit: the tool explains, checks the proposal, shows th
   expect(files.get(`${ROOT}/hello/steps/shout.js`)).toContain('process.stdin')
   expect(await shown()).not.toContain('Draft, not saved yet')
   expect(await draft({ action: 'save' })).toContain('no draft')
-  // /flow list names every flow of the project, with what it does and how its last run went.
+  // /flows list names every flow of the project, with what it does and how its last run went.
   expect(await run('list')).toContain('hello: Greets someone, loudly. (2 steps · not run yet)')
   expect(await run('new list a flow named after a command')).toContain('none of')
 
-  // The name is taken now; /flow edit shows the tool the flow as it is, scripts included.
+  // The name is taken now; /flows edit shows the tool the flow as it is, scripts included.
   expect(await run('new hello again')).toContain('already a flow named')
   expect(await run('edit nope shorter')).toContain('no flow named')
   expect(await run('edit hello make it quieter')).toContain('Changing "hello"')
@@ -126,9 +126,9 @@ test('/flow new and /flow edit: the tool explains, checks the proposal, shows th
   expect(files.get(`${ROOT}/hello/flow.json`)).toContain('softly')
   expect(await shown()).not.toContain('Draft, not saved yet')
 
-  // /flow delete says what goes and deletes nothing until it is typed again with "yes".
+  // /flows delete says what goes and deletes nothing until it is typed again with "yes".
   expect(await run('delete nope')).toContain('no flow named')
-  expect(await run('delete hello')).toContain('/flow delete hello yes')
+  expect(await run('delete hello')).toContain('/flows delete hello yes')
   expect(files.has(`${ROOT}/hello/flow.json`)).toBe(true)
   expect(await run('delete hello yes')).toBe('Deleted "hello".')
   expect(files.has(`${ROOT}/hello/flow.json`)).toBe(false)

@@ -89,8 +89,8 @@ test('the session\'s Claude runs a flow through the next tool: agents, code, an 
     for (const m of told.matchAll(/subagent_type: "([^"]+)" · description: "([^"]+)" · prompt: "([^"]+)"/g)) await $.tool.call({ tool: 'Agent', subagent_type: m[1], description: m[2], prompt: m[3] } as never)
   }
 
-  // /flow run starts nothing by itself: it hands the session's Claude a prompt.
-  await $.command.run({ command: 'flow', args: 'run demo volcanoes', origin: { kind: 'user' } } as never)
+  // /flows run starts nothing by itself: it hands the session's Claude a prompt.
+  await $.command.run({ command: 'flows', args: 'run demo volcanoes', origin: { kind: 'user' } } as never)
   await time.advance(100)
   await until(() => prompts.length === 1)
   expect(prompts[0]).toContain('mcp__flows__next')
@@ -140,8 +140,8 @@ test('the session\'s Claude runs a flow through the next tool: agents, code, an 
   expect(told).toContain('propose one fix')
   expect(run().tracks[1]?.steps[4]?.tokens).toBe(120)
 
-  // /flow retry takes the failed item up again.
-  await $.command.run({ command: 'flow', args: 'retry demo', origin: { kind: 'user' } } as never)
+  // /flows retry takes the failed item up again.
+  await $.command.run({ command: 'flows', args: 'retry demo', origin: { kind: 'user' } } as never)
   await time.advance(100)
   await until(() => prompts.length === 2)
   told = await next()

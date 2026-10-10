@@ -24,7 +24,7 @@ Asking Claude for the same multi-step job twice gives two different jobs: other 
 ### Write it once
 
 ```
-/flow new page-summary find the best pages about a topic and summarise each one into a file
+/flows new page-summary find the best pages about a topic and summarise each one into a file
 ```
 
 Claude interviews you in rounds of numbered questions, each with the answer it recommends, until it is sure of what you want. Then it proposes the flow: the steps appear in the pane as a draft, and the chat shows what was assumed, what was left out, and the code of every script. **Nothing is saved until you say so.**
@@ -32,14 +32,14 @@ Claude interviews you in rounds of numbered questions, each with the answer it r
 ### Run it
 
 ```
-/flow run page-summary volcanoes
+/flows run page-summary volcanoes
 ```
 
 The plugin decides each step and runs the scripts itself; the session's Claude only starts the agents the plugin names and puts the approvals to you. What one step hands the next travels through files, not through the chat.
 
 - **Approvals** are asked in the chat: approve, reject, or send back to the agent with a note.
 - **A failed step** stops the run. Claude says what failed and proposes one fix; with your yes, it makes the fix and takes the run up again at that step.
-- **Stopping the chat stops the flow.** `/flow retry` takes it up where it stopped.
+- **Stopping the chat stops the flow.** `/flows retry` takes it up where it stopped.
 - **It works in Auto mode**, with no permission prompts along the way.
 
 ### The steps
@@ -63,14 +63,14 @@ Every agent step is a pixel crab in the costume of its role, and it moves while 
 
 | Command | What it does |
 | --- | --- |
-| `/flow` | Opens or closes the pane. |
-| `/flow list` | Lists the project's flows: what each does and how its last run went. |
-| `/flow <name>` | Shows that flow in the pane. Add a number to see an earlier run: `/flow <name> 2`. |
-| `/flow new <name> <what it should do>` | Writes a new flow with you, in the chat. |
-| `/flow edit <name> <what to change>` | Changes a flow. |
-| `/flow run <name> [input]` | Runs a flow. The input is what its first step receives. |
-| `/flow retry <name>` | Takes up a run that failed or was stopped, at the step where it stopped. |
-| `/flow delete <name>` | Deletes a flow, its scripts and its runs. It says what goes first, and deletes when you repeat it with `yes`. |
+| `/flows` | Opens or closes the pane. |
+| `/flows list` | Lists the project's flows: what each does and how its last run went. |
+| `/flows <name>` | Shows that flow in the pane. Add a number to see an earlier run: `/flows <name> 2`. |
+| `/flows new <name> <what it should do>` | Writes a new flow with you, in the chat. |
+| `/flows edit <name> <what to change>` | Changes a flow. |
+| `/flows run <name> [input]` | Runs a flow. The input is what its first step receives. |
+| `/flows retry <name>` | Takes up a run that failed or was stopped, at the step where it stopped. |
+| `/flows delete <name>` | Deletes a flow, its scripts and its runs. It says what goes first, and deletes when you repeat it with `yes`. |
 
 A name takes lower-case letters, digits and hyphens.
 
@@ -131,7 +131,7 @@ In Claude Code:
 /plugin install flows@flows-mod
 ```
 
-Then start a new session (or run `/reload-plugins`) and type `/flow`.
+Then start a new session (or run `/reload-plugins`) and type `/flows`.
 
 ## Requirements
 
@@ -159,7 +159,7 @@ Nothing is sent anywhere else. Two things to know before you run a flow someone 
 
 ## Limits
 
-- **A flow runs inside a session.** The chat is busy while it runs, and closing the session stops it; `/flow retry` takes it up again.
+- **A flow runs inside a session.** The chat is busy while it runs, and closing the session stops it; `/flows retry` takes it up again.
 - **No schedules yet.** A flow starts by hand.
 - **The week figure is approximate.** It is the weekly limit's percent used after the run minus before it, so other work in the same minutes counts too.
 - **The plugin API is early access.** Function hooks may change between Claude Code releases.
