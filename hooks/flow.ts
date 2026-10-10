@@ -48,6 +48,11 @@ export const flowDir = (root: string, flow: string): string => `${root}/${flow}`
 export const runDir = (root: string, flow: string, id: number): string => `${root}/${flow}/runs/${id}`
 /** What step `step` of track `track` handed on. */
 export const outFile = (dir: string, track: number, step: number): string => `${dir}/out/${track}-${step}.txt`
+/**
+ * Where the agent of one try of a step writes its result. A file of its own per try (`token` is when the
+ * try started): the Write tool refuses a file that exists and it has not read, so the file must not be there.
+ */
+export const resultFile = (dir: string, track: number, step: number, token: number): string => `${dir}/out/${track}-${step}.result-${token}.txt`
 /** What step `step` of track `track` receives: the run's input, the track's item, or the step before's output. */
 export function inFile(dir: string, run: Run, track: number, step: number): string {
   const t = run.tracks[track]

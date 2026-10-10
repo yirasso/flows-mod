@@ -28,7 +28,7 @@ export type FlowStep = {
   parallel?: number
 }
 
-/** A saved flow: `~/.claude/flows/<name>/flow.json`, or what is wrong with that file. */
+/** A saved flow: `~/Flows/<name>/flow.json`, or what is wrong with that file. */
 export type Flow = { name: string; description: string; cwd?: string; steps: FlowStep[]; error?: string }
 
 export type StepStatus = 'pending' | 'running' | 'waiting' | 'done' | 'failed'
@@ -63,7 +63,7 @@ export type Track = {
 
 export type RunStatus = 'running' | 'waiting' | 'failed' | 'done' | 'stopped' | 'interrupted'
 
-/** One run of a flow: `~/.claude/flows/<name>/runs/<id>/run.json`. */
+/** One run of a flow: `~/Flows/<name>/runs/<id>/run.json`. */
 export type Run = {
   id: number
   flow: string
@@ -87,8 +87,14 @@ export type Run = {
   beat: number
 }
 
-/** What the pane shows: the chosen flow, the open step (`track:step`), and a delete waiting for its second press. */
-export type View = { flow: string | null; open: string | null; confirmDelete: boolean }
+/** What the pane shows: the chosen flow, and one of its earlier runs when asked for. */
+export type View = { flow: string | null; run?: number }
+
+/**
+ * A flow being written or changed with the session's Claude: what the person asked, and, once proposed, the
+ * flow and its scripts (by their path in the flow's folder), not saved yet.
+ */
+export type Draft = { name: string; mode: 'new' | 'edit'; ask: string; flow: Flow | null; files: Record<string, string> }
 
 declare module 'claude-code' {
   interface PluginState {
@@ -97,7 +103,12 @@ declare module 'claude-code' {
       runs: Record<string, Run>
       view: View
       now: number
+      /** The earlier run the pane shows, read from disk. */
+      past: Run | null
+      /** The weekly limit's percent used, as the session last said. */
+      limit: number | null
       me: string
+      draft: Draft | null
     }
   }
 }

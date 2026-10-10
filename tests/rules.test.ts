@@ -14,8 +14,8 @@ test('a flow.json that cannot run says why', async () => {
 })
 
 test('a flow agent writes only inside its folders', async () => {
-  const roots = ['C:/U/.claude/flows/demo/runs/1', 'C:/Dev/Site']
-  expect(inside('C:\\U\\.claude\\flows\\demo\\runs\\1\\out.txt', roots[0] ?? '', roots)).toBe(true)
+  const roots = ['C:/U/Flows/demo/runs/1', 'C:/Dev/Site']
+  expect(inside('C:\\U\\Flows\\demo\\runs\\1\\out.txt', roots[0] ?? '', roots)).toBe(true)
   expect(inside('notes/a.md', 'C:/Dev/Site', roots)).toBe(true)
   expect(inside('C:/Dev/Site2/a.md', 'C:/Dev/Site', roots)).toBe(false)
   expect(inside('C:/Dev/Site/../Other/a.md', 'C:/Dev/Site', roots)).toBe(false)
