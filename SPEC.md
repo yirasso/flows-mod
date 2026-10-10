@@ -84,5 +84,5 @@ A flow is a plain list, top to bottom. Each step receives what the one before ha
 
 - `hooks/flow.ts` holds the rules of a flow and a run, `hooks/author.ts` what Claude is told when writing a flow and the check of a proposal, `hooks/draw.ts` the pane's drawings: none has the engine in it. `hooks/register.tsx` has the hooks, the tools, the commands and the pane; `types/index.d.ts` the state contract.
 - Check a change with `claude plugin validate .`, `claude plugin test .` and a typecheck. The `claude` binary is under `%APPDATA%\Claude\claude-code\<version>\<hash>\claude.exe`.
-- The plugin is installed from this folder (`flows@flows-mod`, the marketplace pointing at `C:DevFlows`): an edit counts after `/reload-plugins`.
+- The plugin is installed from this folder (`flows@flows-mod`, the marketplace pointing at `C:\Dev\Flows`): an edit counts after `/reload-plugins`.
 - In tests, the engine hands paths over with backslashes on Windows. A command's hook may not call `$.prompt.submit` (it holds the turn): the kickoff goes out from a timer.
