@@ -63,7 +63,7 @@ Every agent step is a pixel crab in the costume of its role, and it moves while 
 
 | Command | What it does |
 | --- | --- |
-| `/flows` | Opens or closes the pane. |
+| `/flows` | Opens or closes the pane. The **Flows** button above the prompt does the same. |
 | `/flows list` | Lists the project's flows: what each does and how its last run went. |
 | `/flows <name>` | Shows that flow in the pane. Add a number to see an earlier run: `/flows <name> 2`. |
 | `/flows new <name> <what it should do>` | Writes a new flow with you, in the chat. |

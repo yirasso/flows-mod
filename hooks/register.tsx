@@ -815,6 +815,22 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => pane($.ui.resolve(e), await read($, flows), await read($, runs), await read($, view), await read($, now), e.surface === 'desktop', e.props.bodyColumns ?? 0, await read($, limit), await read($, past), await read($, draft)))
+  // A button above the prompt opens and closes the pane, like /flows. It is drawn above whatever band the
+  // plugins beneath draw (another mod's bar stays under it, whole), and yields to a survey.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    const below = await next(e)
+    if (e.props.hasSurvey) return below
+    const { Box, Button } = $.ui.resolve(e)
+    return (
+      <Box flexDirection="column">
+        <Box justifyContent="flex-end">
+          <Button key="flows-toggle" label="Flows" onPress={() => void togglePane($)} />
+        </Box>
+        {below}
+      </Box>
+    )
+  })
+
 
   // The session's Claude asks what to do next, and brings the person's answer to an approval.
   on('tool.call', { tool: TOOL }, async ($, e) => {
