@@ -818,7 +818,7 @@ export const register: Register = on => {
   // A button above the prompt opens and closes the pane, like /flows. It is drawn above whatever band the
   // plugins beneath draw (another mod's bar stays under it, whole), and yields to a survey.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    const below = await next(e)
+    const below = await next(e).catch(() => null)
     if (e.props.hasSurvey) return below
     const { Box, Button } = $.ui.resolve(e)
     return (
