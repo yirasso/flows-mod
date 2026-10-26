@@ -76,7 +76,7 @@ A name takes lower-case letters, digits and hyphens.
 
 ## The pane
 
-The pane only shows; everything is done from the chat. From top to bottom: the flow and its run, three tiles (what the run took of your weekly limit, its tokens, its time), the weekly limit, and one row per step with its state, its time and tokens, and the first line of its result. The items of a for-each sit under their step. In a terminal the pane is text.
+The pane's buttons do what the commands do. At the top, one button per flow (its dot says how its last run went) and **+ New flow**; under them, for the flow shown, a field for its input with **▶ Run**, **■ Stop** while it runs, **↻ Retry** after it failed or stopped, **Edit**, and **‹ Older run** / **Newer run ›**. New and Edit put the command in the prompt box for you to finish, since writing a flow is a conversation; approvals are answered in the chat. Then: the flow and its run, three tiles (what the run took of your weekly limit, its tokens, its time), the weekly limit, and one row per step with its state, its time and tokens, and the first line of its result. The items of a for-each sit under their step. In a terminal the pane is text.
 
 ## Where flows live
 

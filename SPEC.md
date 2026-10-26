@@ -31,7 +31,7 @@ A flow is a plain list, top to bottom. Each step receives what the one before ha
 ## How it runs
 
 - **The plugin decides, the session's Claude carries out** (changed 10 Oct 2026, after two failed tries with the plugin starting the agents itself). `/flows run` hands the chat a prompt. Claude then calls the plugin's tool `mcp__flows__next`, does the one thing it answers, and calls it again, until the flow is over:
-  - **start agents:** Claude starts the agents the answer names, with the Agent tool, in the foreground. The plugin's `agent.spawn` hook swaps in the step's real task and folder, so what one step hands the next never passes through the chat, and it refuses any agent that is no step waiting to start;
+  - **start agents:** Claude starts the agents the answer names, with the Agent tool, in the background (changed 10 Oct 2026: a foreground agent holds the chat until it returns, so approvals waiting in the pane never reached the person). Claude calls the tool again at once, so an approval is put to the person while agents still work, and is woken when an agent finishes. The plugin's `agent.spawn` hook swaps in the step's real task and folder, so what one step hands the next never passes through the chat, and it refuses any agent that is no step waiting to start;
   - **approval:** Claude shows the person what they are approving and asks them in the chat, then brings their answer back to the tool;
   - **the end:** Claude reports the result, or what failed with a proposed fix.
 - Scripts and for-each splits run inside the plugin, between two calls of the tool.
@@ -43,10 +43,10 @@ A flow is a plain list, top to bottom. Each step receives what the one before ha
 
 ## The pane
 
-- **Read-only, no buttons** (Tomás, 10 Oct 2026, "for now"): everything is done from the chat, and approvals are asked there. From top to bottom: the flow, the run's status (time, tokens, week ≈ x%), the steps, and the commands.
+- **Buttons for what the commands do** (Tomás, 26 Oct 2026; before that the pane was read-only and listed the commands): one button per flow, its dot the last run's state, and **+ New flow**; for the flow shown, an input field with **▶ Run**, **■ Stop** while this session runs it, **↻ Retry** after a failed or stopped run, **Edit**, and **‹ Older run** / **Newer run ›**. Run and Retry hand the chat the same prompt the commands do, so the session's Claude still carries the run out. New and Edit put `/flows new ` or `/flows edit <name> ` in the prompt box for the person to finish. Approvals are still asked in the chat. A **Flows** button above the prompt opens and closes the pane, drawn above another mod's band (Claudify's), which stays whole under it. The commands stay, for the surfaces with no band or no input field (VS Code, mobile). From top to bottom: the buttons, the flow, the run's status (time, tokens, week ≈ x%), the steps.
 - Each step is one row: its character, name, description, model, effort and progress.
 - **Characters:** a pixel crab drawn from scratch as SVG, wearing the costume of the step's role, moving while it works. Eight roles: researcher, writer, builder, designer, coder, reviewer, analyst, messenger. Steps that are not agents have their own drawing. The technique follows the savvy-progress mod (MIT), which gets a thank-you in the README.
-- Each finished step shows the start of what it handed on. `/flows <name>` picks the flow.
+- Each finished step shows the start of what it handed on.
 - **Week %:** the weekly limit's percent used when the run ended minus when it started, shown with "≈" (other work in the same period counts too).
 - With the pane closed: a band above the prompt when a flow needs the person, and a short toast when one finishes.
 - The look follows the Claudify plugin.

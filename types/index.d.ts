@@ -109,6 +109,8 @@ declare module 'claude-code' {
       limit: number | null
       me: string
       draft: Draft | null
+      /** What the person typed in the pane's input field, by flow: the input its Run button starts it with. */
+      typed: Record<string, string>
     }
   }
 }

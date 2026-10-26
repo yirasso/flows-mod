@@ -29,6 +29,7 @@ const past = atom({ plugin: 'flows', key: 'past' } as const, null)
 const limit = atom({ plugin: 'flows', key: 'limit' } as const, null)
 const me = atom({ plugin: 'flows', key: 'me' } as const, '')
 const draft = atom({ plugin: 'flows', key: 'draft' } as const, null)
+const typed = atom({ plugin: 'flows', key: 'typed' } as const, {})
 
 /** How often the timer looks at the flows folder, the time limits and the heartbeat. */
 /** The first words of /flows that are not a flow's name; a flow cannot be called by one. */
@@ -314,12 +315,11 @@ async function directive($: EngineInterface, name: string): Promise<string> {
     const lines = launches.map(([t, s], i) => `${i + 1}. subagent_type: "flows:${typeOf(name, run.steps[s] as FlowStep)}" · description: "${launchName(run, t, s)}" · prompt: "${launchName(run, t, s)}"`)
     return [
       head,
-      `Start ${launches.length === 1 ? 'this agent' : `these ${launches.length} agents`} now with the Agent tool${launches.length === 1 ? '' : ', all in one message'}, each with run_in_background set to false and exactly these values (Flows replaces the prompt with the step's real task, so do not write one):`,
+      `Start ${launches.length === 1 ? 'this agent' : `these ${launches.length} agents`} now with the Agent tool${launches.length === 1 ? '' : ', all in one message'}, each with run_in_background set to true and exactly these values (Flows replaces the prompt with the step's real task, so do not write one):`,
       ...lines,
-      `When ${launches.length === 1 ? 'it has' : 'they have all'} returned, ${again(name)}. Do not act on what the agents answer, and do not do their work yourself.`,
+      `Right after starting ${launches.length === 1 ? 'it' : 'them'}, ${again(name)}: do not wait for the agents, the user may have approvals to answer meanwhile. Do not act on what the agents answer, and do not do their work yourself.`,
     ].join('\n')
   }
-  if (working(run) > 0) return `${head} ${working(run)} of its agents are still working. Do not start them again: wait until they return, then ${again(name)}.`
   const ask = asks[0]
   if (ask) {
     const [t, s] = ask
@@ -331,9 +331,10 @@ async function directive($: EngineInterface, name: string): Promise<string> {
       `First show the user what they are approving, word for word, in a message:`,
       `<to-approve>\n${run.tracks[t]?.steps[s]?.preview || '(nothing)'}\n</to-approve>`,
       `Then ask them what to do: with the AskUserQuestion tool if you have it (options "Approve", "Reject"${back ? ', "Send back" (to the agent, with a note)' : ''}), otherwise with a plain question, ending your turn until they answer.`,
-      `Then call ${TOOL} with {"flow":"${name}","answer":"approve"}, "reject"${back ? `, or "back" with "note" set to what the user wants changed` : ''}. Never answer for the user.`,
+      `${working(run) > 0 ? `${working(run)} agents of this flow are still working in the background; that must not delay this question. ` : ''}${asks.length > 1 ? `${asks.length - 1} more approvals wait behind this one: you will be handed each in turn. ` : ''}Then call ${TOOL} with {"flow":"${name}","approval":"${t}.${s}","answer":"approve"}, "reject"${back ? `, or "back" with "note" set to what the user wants changed` : ''}. Never answer for the user.`,
     ].join('\n')
   }
+  if (working(run) > 0) return `${head} ${working(run)} of its agents are working in the background and nothing waits for the user. Do not start them again and do not poll: say in one short line that the flow is running, then end your turn. You are woken when an agent finishes; then ${again(name)}.`
   if (run.status === 'done') {
     const last = run.tracks.flatMap(t => (t.status === 'done' && t.at === run.steps.length - 1 ? [t.steps[t.at]?.preview ?? ''] : [])).filter(Boolean)
     return [
@@ -429,6 +430,36 @@ async function retryRun($: EngineInterface, name: string): Promise<string> {
   return `Taking up "${name}" (run ${run?.id ?? 0}).`
 }
 
+/** Stops this session's run of a flow where it is: its agents are stopped, and /flows retry takes it up again. */
+async function stopRun($: EngineInterface, name: string): Promise<void> {
+  const run = (await read($, runs))[name]
+  if (!run || !active(run)) return
+  for (const tr of run.tracks) {
+    const s = tr.steps[tr.at]
+    if (s?.status === 'running' && s.agentId) await stopAgent($, s.agentId)
+  }
+  const t = await $.clock.now()
+  await mutate($, name, r => (active(r) ? halt(r, 'stopped', 'Stopped', t) : null))
+  await closeRun($, name)
+}
+
+/** Shows a run of a flow in the pane: the newest as it goes, an earlier one read from its folder. Answers why not, or null. */
+async function showRun($: EngineInterface, name: string, id: number, asked = String(id)): Promise<string | null> {
+  if ((await read($, runs))[name]?.id === id) {
+    await update($, view, () => ({ flow: name }))
+    return null
+  }
+  const root = await rootDir($)
+  const text = Number.isInteger(id) && id > 0 ? await $.fs.read(`${runDir(root, name, id)}/run.json`).catch(() => null) : null
+  if (text === null) {
+    const ids = (await $.fs.list(`${flowDir(root, name)}/runs`).catch(() => [])).filter(d => d.kind === 'dir' && /^\d+$/.test(d.name)).map(d => Number(d.name)).sort((x, y) => x - y)
+    return ids.length ? `"${name}" has no run ${asked}. Its runs: ${ids.join(', ')}.` : `"${name}" has not run yet.`
+  }
+  await update($, past, () => JSON.parse(text) as Run)
+  await update($, view, () => ({ flow: name, run: id }))
+  return null
+}
+
 // ——— Writing and changing a flow, with the session's Claude ———
 
 /** The scripts of a flow's code steps that are on disk, by their path in the flow's folder. */
@@ -513,9 +544,82 @@ async function tick($: EngineInterface): Promise<void> {
   if (busy) await update($, now, () => t)
 }
 
-// ——— The pane: what is happening, to look at; everything is done from the chat ———
+// ——— The pane: what is happening, and buttons for what /flows does (approvals stay in the chat) ———
 
 type Ui = ReturnType<EngineInterface['ui']['resolve']>
+
+/** What the pane's buttons and its input field do. Each reads the state it needs when pressed, never at draw time. */
+type Acts = {
+  show: (name: string) => Promise<void>
+  showRun: (name: string, id: number) => Promise<void>
+  run: (name: string, input?: string) => Promise<void>
+  retry: (name: string) => Promise<void>
+  stop: (name: string) => Promise<void>
+  type: (name: string, text: string) => Promise<void>
+  /** Puts a /flows command in the prompt box for the person to finish: writing a flow is a conversation. */
+  write: (text: string) => Promise<void>
+}
+
+function actsOf($: EngineInterface): Acts {
+  // A run or a retry that did not start says why; one that did shows in the pane.
+  const started = async (name: string, said: string): Promise<void> => {
+    if (!active((await read($, runs))[name])) $.ui.toast(said)
+  }
+  return {
+    show: async name => {
+      await update($, view, () => ({ flow: name }))
+    },
+    showRun: async (name, id) => {
+      const why = await showRun($, name, id)
+      if (why) $.ui.toast(why)
+    },
+    run: async (name, input) => {
+      const text = input ?? (await read($, typed))[name] ?? ''
+      await started(name, await startRun($, name, text.trim()))
+      if (active((await read($, runs))[name])) await update($, typed, all => ({ ...all, [name]: '' }))
+    },
+    retry: async name => started(name, await retryRun($, name)),
+    stop: name => stopRun($, name),
+    type: async (name, text) => {
+      await update($, typed, all => ({ ...all, [name]: text }))
+    },
+    write: async text => {
+      const filled = await $.prompt.fill({ text, mode: 'replace' }).catch(() => null)
+      if (!filled?.isFilled) $.ui.toast(`Type ${text.trim()} … in the chat`)
+    },
+  }
+}
+
+/** The pane's controls: one button per flow, then what can be done with the one shown. */
+function controls(ui: Ui, acts: Acts, list: Flow[], all: Record<string, Run>, flow: Flow | undefined, shown: Run | undefined, text: string, mine: string, isDraft: boolean) {
+  const { Box, Button } = ui
+  const name = flow?.name
+  const newest = name ? all[name] : undefined
+  const isActive = active(newest)
+  const canRun = Boolean(flow && !isDraft && !isActive && !flow.error)
+  const at = shown?.id ?? 0
+  return (
+    <Box flexDirection="column" gap={1}>
+      <Box key="flows" flexDirection="row" flexWrap="wrap" gap={1}>
+        {list.map(f => (
+          <Button key={`flow:${f.name}`} label={`${GLYPH[all[f.name]?.status ?? 'pending'] ?? GLYPH.ended} ${f.name}`} variant={f.name === name && !isDraft ? 'primary' : undefined} onPress={() => acts.show(f.name)} />
+        ))}
+        <Button key="new" label="+ New flow" dimColor onPress={() => acts.write('/flows new ')} />
+      </Box>
+      {name && !isDraft && (
+        <Box key="actions" flexDirection="row" flexWrap="wrap" gap={1} alignItems="center">
+          {canRun && 'Input' in ui && <ui.Input key="input" placeholder="Input (optional)" value={text} submitLabel="Run" onInput={value => void acts.type(name, value)} onSubmit={value => void acts.run(name, value)} />}
+          {canRun && <Button key="run" label="▶ Run" variant="primary" onPress={() => acts.run(name)} />}
+          {isActive && newest?.owner === mine && <Button key="stop" label="■ Stop" onPress={() => acts.stop(name)} />}
+          {newest && !isActive && newest.status !== 'done' && <Button key="retry" label="↻ Retry" onPress={() => acts.retry(name)} />}
+          <Button key="edit" label="Edit" dimColor onPress={() => acts.write(`/flows edit ${name} `)} />
+          {at > 1 && <Button key="older" label="‹ Older run" dimColor onPress={() => acts.showRun(name, at - 1)} />}
+          {newest && at > 0 && at < newest.id && <Button key="newer" label="Newer run ›" dimColor onPress={() => acts.showRun(name, at + 1)} />}
+        </Box>
+      )}
+    </Box>
+  )
+}
 
 const GLYPH: Record<string, string> = { pending: '○', running: '●', waiting: '◷', done: '✓', failed: '✗', queued: '○', ended: '–' }
 const clock = (ms: number): string => `${Math.floor(ms / 60_000)}:${String(Math.floor(ms / 1000) % 60).padStart(2, '0')}`
@@ -533,15 +637,20 @@ function meter(s: StepRun | undefined, t: number): string {
   return s.tokens ? `${time} · ${count(s.tokens)}` : time
 }
 
-function pane(ui: Ui, list: Flow[], all: Record<string, Run>, v: View, t: number, isDesktop: boolean, cols: number, weekLimit: number | null, old: Run | null, drafted: Draft | null) {
-  const { Box, Text } = ui
+function pane(ui: Ui, acts: Acts, list: Flow[], all: Record<string, Run>, v: View, t: number, isDesktop: boolean, cols: number, weekLimit: number | null, old: Run | null, drafted: Draft | null, typedBy: Record<string, string>, mine: string) {
+  const { Box, Text, Button } = ui
   // A flow being written shows in place of the chosen one, until it is saved or dropped.
   const isDraft = Boolean(drafted?.flow)
   if (list.length === 0 && !isDraft) {
     return (
-      <Box flexDirection="column">
-        <Text bold>No flows yet</Text>
-        <Text dimColor>This project has no flows yet. /flows new &lt;name&gt; &lt;what it should do&gt; writes one, in its Flows folder.</Text>
+      <Box flexDirection="column" gap={1}>
+        <Box flexDirection="column">
+          <Text bold>No flows yet</Text>
+          <Text dimColor>This project has no flows yet. Describe one in the chat and Claude writes it with you, in its Flows folder.</Text>
+        </Box>
+        <Box>
+          <Button key="new" label="+ New flow" variant="primary" onPress={() => acts.write('/flows new ')} />
+        </Box>
       </Box>
     )
   }
@@ -557,13 +666,7 @@ function pane(ui: Ui, list: Flow[], all: Record<string, Run>, v: View, t: number
   const items = run?.tracks.slice(1) ?? []
   const each = steps.findIndex(s => s.type === 'each')
   const week = run && run.weekStart != null && run.weekEnd != null ? Math.max(0, run.weekEnd - run.weekStart) : null
-  const others = list.filter(f => f.name !== name)
-  const foot = (
-    <Box flexDirection="column">
-      {others.length > 0 && <Text dimColor>{`Other flows: ${others.map(f => `${f.name}${active(all[f.name]) ? ` (${all[f.name]?.status})` : ''}`).join(', ')} · /flows <name>`}</Text>}
-      {!isDraft && <Text dimColor>{`/flows run ${name} [input] · /flows retry ${name} · /flows ${name} <run> · /flows edit ${name} <what to change>`}</Text>}
-    </Box>
-  )
+  const top = controls(ui, acts, list, all, flow, run, typedBy[name] ?? '', mine, isDraft)
 
   // The desktop app draws: a header, then one picture per step and per item.
   if (isDesktop && 'Svg' in ui) {
@@ -582,7 +685,7 @@ function pane(ui: Ui, list: Flow[], all: Record<string, Run>, v: View, t: number
       tokens: run ? count(tokensOf(run)) : '—',
       time: run ? clock(Math.max(0, (run.endedAt ?? Math.max(t, run.startedAt)) - run.startedAt)) : '—',
       limit: weekLimit,
-      note: isDraft ? DRAFTED : flow.error ? `This flow cannot run: ${flow.error}` : (run?.ended ?? (run ? '' : `Not run yet. /flows run ${name} starts it.`)),
+      note: isDraft ? DRAFTED : flow.error ? `This flow cannot run: ${flow.error}` : (run?.ended ?? (run ? '' : 'Not run yet.')),
       isError: Boolean(flow.error),
     })
     const pictures: { key: string; source: string; height: number; alt: string }[] = []
@@ -607,11 +710,11 @@ function pane(ui: Ui, list: Flow[], all: Record<string, Run>, v: View, t: number
     })
     return (
       <Box flexDirection="column">
+        <Box marginBottom={1}>{top}</Box>
         <Svg key="head" source={head.source} alt={`${name}${run ? `: run ${run.id}, ${run.status}` : ''}`} width={w} height={head.height} />
         {pictures.map(p => (
           <Svg key={p.key} source={p.source} alt={p.alt} width={w} height={p.height} />
         ))}
-        {foot}
       </Box>
     )
   }
@@ -635,6 +738,7 @@ function pane(ui: Ui, list: Flow[], all: Record<string, Run>, v: View, t: number
 
   return (
     <Box flexDirection="column" gap={1}>
+      {top}
       <Box flexDirection="column">
         <Text bold>{name}</Text>
         {flow.description && <Text dimColor>{flow.description}</Text>}
@@ -649,7 +753,7 @@ function pane(ui: Ui, list: Flow[], all: Record<string, Run>, v: View, t: number
           {run.ended && <Text dimColor>{run.ended}</Text>}
         </Box>
       ) : (
-        <Text color={isDraft ? 'warning' : 'inactive'}>{isDraft ? DRAFTED : `Not run yet. /flows run ${name} starts it.`}</Text>
+        <Text color={isDraft ? 'warning' : 'inactive'}>{isDraft ? DRAFTED : 'Not run yet.'}</Text>
       )}
       <Box flexDirection="column">
         {steps.map((spec, i) => {
@@ -667,7 +771,6 @@ function pane(ui: Ui, list: Flow[], all: Record<string, Run>, v: View, t: number
           )
         })}
       </Box>
-      {foot}
     </Box>
   )
 }
@@ -695,7 +798,7 @@ export const register: Register = on => {
         name: 'next',
         description: [
           'Runs a saved flow of the Flows plugin, one step at a time. Call it when the user runs a flow (/flows run, /flows retry), and again after each thing it tells you to do, until it says the flow is over.',
-          'It answers with exactly one thing to do: start the agents it names (with the Agent tool, in the foreground, with the subagent_type and description it gives; Flows fills in each agent\'s real task), or put an approval to the user, or report the end.',
+          'It answers with exactly one thing to do: start the agents it names (with the Agent tool, in the background, with the subagent_type and description it gives; Flows fills in each agent\'s real task), or put an approval to the user, or report the end.',
           'Follow its answer to the letter. Never do a step\'s work yourself, never answer an approval for the user, never read or change the run\'s files, and keep your own messages to one short line per step.',
         ].join(' '),
         inputSchema: {
@@ -704,6 +807,7 @@ export const register: Register = on => {
             flow: { type: 'string', description: "The flow's name." },
             answer: { type: 'string', enum: ['approve', 'reject', 'back'], description: "The user's answer to the approval the flow waits on. Only what the user said." },
             note: { type: 'string', description: 'With answer "back": what the user wants changed.' },
+            approval: { type: 'string', description: 'With an answer: the approval it answers, as "track.step", exactly as the flow named it.' },
             retry: { type: 'boolean', description: 'True to take up a run that failed or was stopped, at its failed step.' },
           },
           required: ['flow'],
@@ -788,17 +892,8 @@ export const register: Register = on => {
         return { text: `Showing "${verb}".` }
       }
       // An earlier run, read from its folder.
-      const id = Number(name)
-      const root = await rootDir($)
-      const text = Number.isInteger(id) && id > 0 ? await $.fs.read(`${runDir(root, verb, id)}/run.json`).catch(() => null) : null
-      if (text === null) {
-        const ids = (await $.fs.list(`${flowDir(root, verb)}/runs`).catch(() => [])).filter(d => d.kind === 'dir' && /^\d+$/.test(d.name)).map(d => Number(d.name)).sort((x, y) => x - y)
-        return { text: ids.length ? `"${verb}" has no run ${name}. Its runs: ${ids.join(', ')}.` : `"${verb}" has not run yet.` }
-      }
-      const run = JSON.parse(text) as Run
-      await update($, past, () => run)
-      await update($, view, () => ({ flow: verb, run: id }))
-      return { text: `Showing run ${id} of "${verb}". /flows ${verb} goes back to the newest.` }
+      const why = await showRun($, verb, Number(name), name)
+      return { text: why ?? `Showing run ${name} of "${verb}". /flows ${verb} goes back to the newest.` }
     }
     if (verb === 'new' || verb === 'edit') {
       if (!NAME.test(name) || VERBS.includes(name)) return { text: `Usage: /flows ${verb} <name> <${verb === 'new' ? 'what it should do' : 'what to change'}>. The name takes lower-case letters, digits and hyphens, and is none of: ${VERBS.join(', ')}.` }
@@ -814,12 +909,11 @@ export const register: Register = on => {
     return { text: USAGE }
   })
 
-  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => pane($.ui.resolve(e), await read($, flows), await read($, runs), await read($, view), await read($, now), e.surface === 'desktop', e.props.bodyColumns ?? 0, await read($, limit), await read($, past), await read($, draft)))
   // A button above the prompt opens and closes the pane, like /flows. It is drawn above whatever band the
   // plugins beneath draw (another mod's bar stays under it, whole), and yields to a survey.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (e.props.hasSurvey) return next(e)
     const below = await next(e).catch(() => null)
-    if (e.props.hasSurvey) return below
     const { Box, Button } = $.ui.resolve(e)
     return (
       <Box flexDirection="column">
@@ -831,10 +925,11 @@ export const register: Register = on => {
     )
   })
 
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => pane($.ui.resolve(e), actsOf($), await read($, flows), await read($, runs), await read($, view), await read($, now), e.surface === 'desktop', e.props.bodyColumns ?? 0, await read($, limit), await read($, past), await read($, draft), await read($, typed), await read($, me)))
 
   // The session's Claude asks what to do next, and brings the person's answer to an approval.
   on('tool.call', { tool: TOOL }, async ($, e) => {
-    const input = e as { flow?: unknown; answer?: unknown; note?: unknown; retry?: unknown }
+    const input = e as { flow?: unknown; answer?: unknown; note?: unknown; retry?: unknown; approval?: unknown }
     const name = typeof input.flow === 'string' ? input.flow : ''
     if (mainTurn) turnOf.set(name, mainTurn)
     if (input.retry === true) {
@@ -843,7 +938,9 @@ export const register: Register = on => {
       if (why) return { result: why }
     }
     const run = (await read($, runs))[name]
-    const ask = run ? waiting(run)[0] : undefined
+    // The approval the person answered is named ("track.step"): a newer one may have come in ahead of it since.
+    const named = /^(\d+)\.(\d+)$/.exec(typeof input.approval === 'string' ? input.approval : '')
+    const ask = run ? (waiting(run).find(([t, i]) => named && t === Number(named[1]) && i === Number(named[2])) ?? (named ? undefined : waiting(run)[0])) : undefined
     if (run && ask && (input.answer === 'approve' || input.answer === 'reject' || input.answer === 'back')) await decide($, name, ask[0], ask[1], input.answer, typeof input.note === 'string' ? input.note : '')
     await inflight
     await advance($, name)
@@ -867,7 +964,7 @@ export const register: Register = on => {
     const dir = runDir(await rootDir($), name, run.id)
     const prompt = await agentPrompt($, run, track, step, dir, token)
     const spawn = (async () => {
-      const started = await next({ ...e, prompt, cwd: run.cwd ?? dir, background: false })
+      const started = await next({ ...e, prompt, cwd: run.cwd ?? dir, background: true })
       // The id comes with the answer; where it does not, the agent is found in the session's list by its description.
       const agentId = started.deny !== undefined ? undefined : (started.agentId ?? (await $.agent.list().catch(() => [])).filter(a => a.description === e.description && !known.has(a.id)).pop()?.id)
       if (agentId) {

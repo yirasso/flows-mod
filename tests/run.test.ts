@@ -118,15 +118,17 @@ test('the session\'s Claude runs a flow through the next tool: agents, code, an 
   expect(told).toContain('["one","two"]')
   expect(told).toContain('"Send back"')
 
-  // The pane only shows: it says where the answer is wanted and has nothing to press. In a terminal it is
-  // text; in the desktop app, one drawing for the header and one per step.
+  // The pane says where the answer is wanted; the approval itself is answered in the chat. While the run
+  // goes on it can be stopped, not started again. In a terminal it is text; in the desktop app, one drawing
+  // for the header and one per step.
   const term = await $.ui.mount({ plugin: 'flows', surface: 'terminal', component: 'Pane', requestId: 'flows', props: { title: 'Flows', isFocused: false } as never, viewport: { columns: 60, rows: 50 } as never })
   expect((await term.findAll({ type: 'Text' })).map(t => t.text).join(' ')).toContain('Waiting for your answer in the chat')
-  expect((await term.findAll({ type: 'Button' })).length).toBe(0)
+  expect(await term.find({ key: 'run' })).toBeUndefined()
+  expect(await term.find({ key: 'stop' })).toBeDefined()
   await term.unmount()
   const desk = await $.ui.mount({ plugin: 'flows', surface: 'desktop', component: 'Pane', requestId: 'flows', props: { title: 'Flows', isFocused: false, bodyColumns: 60 } as never, viewport: { columns: 60, rows: 50 } as never })
   expect((await desk.findAll({ type: 'Svg' })).length).toBe(1 + FLOW.steps.length)
-  expect((await desk.findAll({ type: 'Button' })).length).toBe(0)
+  expect(await desk.find({ key: 'run' })).toBeUndefined()
 
   // Approved: one agent per item, each with its item as input.
   told = await next({ answer: 'approve' })
