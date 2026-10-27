@@ -53,6 +53,7 @@ A flow is a plain list, top to bottom. Each step receives what the one before ha
 
 ## The chat
 
+- **Everything works in plain words** (Tomás, 27 Oct 2026; the commands stay, for those who prefer them). The plugin's tool `mcp__flows__manage` does what `/flows` does when the person asks in their own words: `open` and `close` the pane, `list` the flows, `show` one (or an earlier run), `run` one with its input, `retry`, `stop`, `delete`. A name the person gave in their own words ("visitas espanha") brings back the project's flows with their descriptions, for Claude to pick the one meant or ask. `run` and `retry` hand no prompt to the chat, since Claude is already in its turn: the answer is the run's first step. `delete` first says what would go; it deletes only on a second call with `confirmed`, once the person said yes. Writing and changing a flow go through `mcp__flows__draft`, with or without `/flows new` and `/flows edit`.
 - `/flows` opens and closes the pane.
 - **`/flows new <name> <what it should do>`** and **`/flows edit <name> <what to change>`** hand the chat a prompt. Claude calls the plugin's tool `mcp__flows__draft`:
   - `start` answers how to write the flow: interview the person in rounds until at least 90% sure, what each step type is, and, for an edit, the flow as it is now with its scripts;

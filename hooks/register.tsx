@@ -19,6 +19,8 @@ const PANE = 'flows'
 const TOOL = 'mcp__flows__next'
 /** The tool the session's Claude writes and changes flows with. */
 const DRAFT = 'mcp__flows__draft'
+/** The tool the session's Claude does what /flows does with, from the person's own words. */
+const MANAGE = 'mcp__flows__manage'
 /** The tool the session has a foreground agent hand its report back with; a step's agent needs it. */
 const HANDBACK = 'SubagentHandback'
 const flows = atom({ plugin: 'flows', key: 'flows' } as const, [])
@@ -307,7 +309,7 @@ const again = (name: string): string => `call ${TOOL} again with {"flow":"${name
 /** The next thing to do for a run, in words for the session's Claude. */
 async function directive($: EngineInterface, name: string): Promise<string> {
   const run = (await read($, runs))[name]
-  if (!run) return `There is no run of a flow named "${name}". Tell the user to start one with /flows run ${name}.`
+  if (!run) return `"${name}" has no run yet. If the user wants it started, call ${MANAGE} with {"action":"run","flow":"${name}"}.`
   const head = `Flow "${name}", run ${run.id}.`
   const asks = waiting(run)
   const launches = toLaunch(run)
@@ -350,10 +352,10 @@ async function directive($: EngineInterface, name: string): Promise<string> {
       ...failed.map(line => `- ${line}`),
       `Tell the user what failed, in plain words, and propose one fix to the flow: say exactly what you would change, and show the changed lines if it is a script. Ask them once whether to make it. Change nothing until they agree.`,
       `If they agree, call ${DRAFT} with {"flow":"${name}","action":"start"} to see the flow as it is, then with "action":"propose", the whole flow with the fix, and "agreed":true: that saves it at once, since they already said yes. Do not ask them again. Then call ${TOOL} with {"flow":"${name}","retry":true}, which takes this run up again at the failed step.`,
-      `If the fix adds, removes or reorders steps, this run cannot go on with it: tell the user to start a new one with /flows run ${name}.`,
+      `If the fix adds, removes or reorders steps, this run cannot go on with it: offer to start a new one (${MANAGE} with {"action":"run","flow":"${name}"}).`,
     ].join('\n')
   }
-  return `${head} It was ${run.status}. Do nothing more for it; tell the user that /flows retry ${name} takes it up again.`
+  return `${head} It was ${run.status}. Do nothing more for it; tell the user it can be taken up again where it stopped, if they ask.`
 }
 
 /** The first prompt of a run (or of its retry): the session's Claude takes it from there with the tool. */
@@ -376,11 +378,15 @@ async function prune($: EngineInterface, root: string, name: string, newest: num
   }
 }
 
-async function startRun($: EngineInterface, name: string, input: string): Promise<string> {
+/**
+ * Starts a new run of a flow. From a command or a button the chat is handed the first prompt (`kickIt`);
+ * from the session's Claude, already in its turn, it is not: the tool's answer goes on from there.
+ */
+async function startRun($: EngineInterface, name: string, input: string, kickIt = true): Promise<string> {
   const flow = (await read($, flows)).find(f => f.name === name)
   if (!flow) return `There is no flow named "${name}".`
   if (flow.error) return `"${name}" cannot run: ${flow.error}.`
-  if (active((await read($, runs))[name])) return `"${name}" is already running. Stop the chat to stop it; /flows retry ${name} takes it up again.`
+  if (active((await read($, runs))[name])) return `"${name}" is already running.`
   const root = await rootDir($)
   const id = (await latestId($, root, name)) + 1
   const t = await $.clock.now()
@@ -392,7 +398,7 @@ async function startRun($: EngineInterface, name: string, input: string): Promis
   await update($, view, () => ({ flow: name }))
   await saveRun($, name)
   await advance($, name)
-  kick($, kickoff(name, id, false))
+  if (kickIt) kick($, kickoff(name, id, false))
   return `Started "${name}" (run ${id}).`
 }
 
@@ -786,6 +792,96 @@ async function togglePane($: EngineInterface): Promise<string> {
   return 'Opened the Flows pane.'
 }
 
+/** The project's flows, one line each: what it does, how long it is, and how its last run went. */
+async function flowLines($: EngineInterface): Promise<string[]> {
+  const all = await read($, runs)
+  return (await read($, flows)).map(f => {
+    const run = all[f.name]
+    const last = f.error ? `cannot run: ${f.error}` : run ? `run ${run.id} ${run.status}` : 'not run yet'
+    return `${f.name}: ${f.description || '(no description)'} (${f.steps.length} step${f.steps.length === 1 ? '' : 's'} · ${last})`
+  })
+}
+
+/** What deleting a flow takes with it, in words, and its folder; or why it cannot be deleted now. */
+async function whatGoes($: EngineInterface, name: string): Promise<{ why: string } | { what: string; dir: string }> {
+  const flow = (await read($, flows)).find(f => f.name === name)
+  if (!flow) return { why: `There is no flow named "${name}".` }
+  if (active((await read($, runs))[name])) return { why: `"${name}" is running. Stop it first, then delete it.` }
+  const dir = flowDir(await rootDir($), name)
+  const kept = (await $.fs.list(`${dir}/runs`).catch(() => [])).filter(d => d.kind === 'dir').length
+  return { what: `the flow "${name}" for good: its ${flow.steps.length} step${flow.steps.length === 1 ? '' : 's'}, its scripts and its ${kept} run${kept === 1 ? '' : 's'}, in ${dir}`, dir }
+}
+
+/** Deletes a flow's folder; nothing brings it back. */
+async function removeFlow($: EngineInterface, name: string, dir: string): Promise<string> {
+  const gone = await $.process.run(['node', '-e', 'require("fs").rmSync(process.argv[1],{recursive:true,force:true})', dir]).catch(() => null)
+  await loadFlows($)
+  const left = (await read($, flows)).some(f => f.name === name)
+  return left || gone?.exitCode !== 0 ? `"${name}" could not be deleted. Its folder is ${dir}.` : `Deleted "${name}".`
+}
+
+const MANAGE_ACTIONS = ['open', 'close', 'list', 'show', 'run', 'retry', 'stop', 'delete'] as const
+
+/**
+ * What /flows does, for the session's Claude when the person asks in their own words ("open the flows",
+ * "start the Spain visits flow"). Answers what happened and what to tell the person, or what to do next.
+ */
+async function manage($: EngineInterface, input: { action?: unknown; flow?: unknown; input?: unknown; run?: unknown; confirmed?: unknown }): Promise<string> {
+  const action = typeof input.action === 'string' ? input.action : ''
+  const name = typeof input.flow === 'string' ? input.flow.trim() : ''
+  if (action === 'close') {
+    await $.ui.close({ id: PANE }).catch(() => undefined)
+    return 'Closed the Flows pane. Tell the user in a few words.'
+  }
+  if (action === 'open') {
+    await loadFlows($).catch(() => undefined)
+    await $.ui.open({ id: PANE, title: 'Flows' }).catch(() => undefined)
+    return 'Opened the Flows pane. Tell the user in a few words.'
+  }
+  if (!(await rootDir($))) return `${NO_FOLDER} Tell the user so.`
+  await loadFlows($)
+  const lines = await flowLines($)
+  const listed = lines.length ? [`The flows of this project (${await rootDir($)}):`, ...lines.map(l => `- ${l}`)] : ['This project has no flows yet.']
+  if (action === 'list') return [...listed, lines.length ? 'Tell the user, as a short list.' : `Tell the user, and offer to write one with them (${DRAFT}).`].join('\n')
+  if (!(MANAGE_ACTIONS as readonly string[]).includes(action)) return `Call ${MANAGE} with "action" one of ${MANAGE_ACTIONS.join(', ')}. To write or change a flow, use ${DRAFT}.`
+  // Every other action names a flow: one the person named in their own words is found in the list.
+  if (!(await read($, flows)).some(f => f.name === name)) {
+    return [name ? `There is no flow named "${name}".` : 'Name the flow.', ...listed, lines.length ? 'If one of these is clearly what the user meant, call again with its name; otherwise ask them which.' : `Tell the user, and offer to write one with them (${DRAFT}).`].join('\n')
+  }
+  if (action === 'show') {
+    await $.ui.open({ id: PANE, title: 'Flows' }).catch(() => undefined)
+    const id = typeof input.run === 'number' ? input.run : undefined
+    if (id === undefined) await update($, view, () => ({ flow: name }))
+    const why = id === undefined ? null : await showRun($, name, id)
+    return why ? `${why} Tell the user.` : `Showing ${id === undefined ? `"${name}"` : `run ${id} of "${name}"`} in the Flows pane. Tell the user in a few words.`
+  }
+  if (action === 'run' || action === 'retry') {
+    await $.ui.open({ id: PANE, title: 'Flows' }).catch(() => undefined)
+    if (action === 'run') {
+      const said = await startRun($, name, typeof input.input === 'string' ? input.input.trim() : '', false)
+      if (!active((await read($, runs))[name])) return `${said} Tell the user.`
+    } else {
+      const why = await takeUp($, name)
+      if (why) return `${why} Tell the user.`
+    }
+    // The run is this turn's now: the person stopping the chat stops it.
+    if (mainTurn) turnOf.set(name, mainTurn)
+    return `${action === 'run' ? 'Started' : 'Took up'} "${name}". Carry it out now, step by step, until it is over:\n${await directive($, name)}`
+  }
+  if (action === 'stop') {
+    const run = (await read($, runs))[name]
+    if (!active(run)) return `"${name}" is not running. Tell the user.`
+    if (run?.owner !== (await read($, me))) return `"${name}" is running in another session; stop it there. Tell the user.`
+    await stopRun($, name)
+    return `Stopped "${name}". Tell the user; it can be taken up again where it stopped.`
+  }
+  // Delete: nothing brings a flow back, so the person says yes to exactly what goes.
+  const goes = await whatGoes($, name)
+  if ('why' in goes) return `${goes.why} Tell the user.`
+  if (input.confirmed !== true) return `This would delete ${goes.what}. Tell the user exactly that and ask whether to go ahead. Only if they say yes, call ${MANAGE} again with {"action":"delete","flow":"${name}","confirmed":true}.`
+  return `${await removeFlow($, name, goes.dir)} Tell the user.`
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     if (!(await read($, me))) {
@@ -797,7 +893,7 @@ export const register: Register = on => {
       .register({
         name: 'next',
         description: [
-          'Runs a saved flow of the Flows plugin, one step at a time. Call it when the user runs a flow (/flows run, /flows retry), and again after each thing it tells you to do, until it says the flow is over.',
+          `Carries out a run of a saved flow of the Flows plugin, one step at a time, once it has started (by ${MANAGE}, /flows run or /flows retry, or a button of the Flows pane). Call it again after each thing it tells you to do, until it says the flow is over. To start, stop, list, show or delete a flow, or open the Flows pane, use ${MANAGE}.`,
           'It answers with exactly one thing to do: start the agents it names (with the Agent tool, in the background, with the subagent_type and description it gives; Flows fills in each agent\'s real task), or put an approval to the user, or report the end.',
           'Follow its answer to the letter. Never do a step\'s work yourself, never answer an approval for the user, never read or change the run\'s files, and keep your own messages to one short line per step.',
         ].join(' '),
@@ -820,7 +916,7 @@ export const register: Register = on => {
     await $.tool
       .register({
         name: 'draft',
-        description: 'Writes or changes a saved flow of the Flows plugin, with the user. Call it with {"flow": name, "action": "start"} when the user wants a new flow (/flows new) or a change to one (/flows edit, or a fix after a failed run): it answers how to interview them and what a flow is made of. Then "propose" sends the whole flow to be checked and shown in the pane as a draft, and "save" writes it once the user agreed; "discard" drops the draft. Never save without the user saying so.',
+        description: 'Writes or changes a saved flow of the Flows plugin, with the user. Call it with {"flow": name, "action": "start"} when the user wants a new flow or a change to one, in their own words or with /flows new or /flows edit, or a fix after a failed run (' + MANAGE + ' with "list" shows the names already taken): it answers how to interview them and what a flow is made of. Then "propose" sends the whole flow to be checked and shown in the pane as a draft, and "save" writes it once the user agreed; "discard" drops the draft. Never save without the user saying so.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -833,6 +929,29 @@ export const register: Register = on => {
             agreed: { type: 'boolean', description: 'With "propose", true only when the user has already said yes to exactly this change (a fix they approved after a failed run): the flow is then saved at once, with no draft and no second question.' },
           },
           required: ['flow', 'action'],
+        },
+        isDeferred: false,
+      })
+      .catch(() => undefined)
+    await $.tool
+      .register({
+        name: 'manage',
+        description: [
+          'Does what the /flows command does, for the saved flows (repeatable automations) of the Flows plugin, when the user asks in their own words, in any language: "open the flows", "which flows do I have", "start the Spain visits flow with Madrid", "stop it", "take it up again", "delete the test flow".',
+          'Actions: "open" and "close" the Flows pane; "list" the project\'s flows; "show" one in the pane (with "run" for an earlier run); "run" one, with "input" when the user gave one; "retry" takes up a run that failed or was stopped, where it stopped; "stop" a run; "delete" a flow.',
+          'Name the flow as the user did when you do not know its exact name: the answer lists the flows to pick from. After "run" or "retry", do what the answer says, step by step, with mcp__flows__next.',
+          'To write a new flow or change one, use mcp__flows__draft. Never set "confirmed" unless the user said yes to that very deletion.',
+        ].join(' '),
+        inputSchema: {
+          type: 'object',
+          properties: {
+            action: { type: 'string', enum: [...MANAGE_ACTIONS] },
+            flow: { type: 'string', description: "The flow's name, or the user's words for it." },
+            input: { type: 'string', description: 'With "run": what the flow\'s first step receives, from what the user said.' },
+            run: { type: 'number', description: 'With "show": the number of an earlier run.' },
+            confirmed: { type: 'boolean', description: 'With "delete": true only once the user said yes to what the first call said would go.' },
+          },
+          required: ['action'],
         },
         isDeferred: false,
       })
@@ -855,29 +974,17 @@ export const register: Register = on => {
     if (!(await rootDir($))) return { text: NO_FOLDER }
     await loadFlows($)
     if (verb === 'list') {
-      const list = await read($, flows)
-      const all = await read($, runs)
-      if (list.length === 0) return { text: `This project has no flows yet. /flows new <name> <what it should do> writes one, in ${await rootDir($)}.` }
-      // One line a flow: what it does, how long it is, and how its last run went.
-      const lines = list.map(f => {
-        const run = all[f.name]
-        const last = f.error ? `cannot run: ${f.error}` : run ? `run ${run.id} ${run.status}` : 'not run yet'
-        return `${f.name}: ${f.description || '(no description)'} (${f.steps.length} step${f.steps.length === 1 ? '' : 's'} · ${last})`
-      })
-      return { text: [`${list.length} flow${list.length === 1 ? '' : 's'} in ${await rootDir($)}:`, ...lines].join('\n') }
+      const lines = await flowLines($)
+      if (lines.length === 0) return { text: `This project has no flows yet. /flows new <name> <what it should do> writes one, in ${await rootDir($)}.` }
+      return { text: [`${lines.length} flow${lines.length === 1 ? '' : 's'} in ${await rootDir($)}:`, ...lines].join('\n') }
     }
     if (verb === 'delete') {
-      const flow = (await read($, flows)).find(f => f.name === name)
-      if (!flow) return { text: name ? `There is no flow named "${name}".` : 'Usage: /flows delete <name>' }
-      if (active((await read($, runs))[name])) return { text: `"${name}" is running. Stop the chat first, then delete it.` }
-      const dir = flowDir(await rootDir($), name)
-      const kept = (await $.fs.list(`${dir}/runs`).catch(() => [])).filter(d => d.kind === 'dir').length
+      if (!name) return { text: 'Usage: /flows delete <name>' }
+      const goes = await whatGoes($, name)
+      if ('why' in goes) return { text: goes.why }
       // Nothing brings a deleted flow back, so the command is typed twice: once to see what goes, once with "yes".
-      if (rest[0] !== 'yes') return { text: `This deletes the flow "${name}" for good: its ${flow.steps.length} step${flow.steps.length === 1 ? '' : 's'}, its scripts and its ${kept} run${kept === 1 ? '' : 's'}, in ${dir}. To go ahead: /flows delete ${name} yes` }
-      const gone = await $.process.run(['node', '-e', 'require("fs").rmSync(process.argv[1],{recursive:true,force:true})', dir]).catch(() => null)
-      await loadFlows($)
-      const left = (await read($, flows)).some(f => f.name === name)
-      return { text: left || gone?.exitCode !== 0 ? `"${name}" could not be deleted. Its folder is ${dir}.` : `Deleted "${name}".` }
+      if (rest[0] !== 'yes') return { text: `This deletes ${goes.what}. To go ahead: /flows delete ${name} yes` }
+      return { text: await removeFlow($, name, goes.dir) }
     }
     if ((verb === 'run' || verb === 'retry') && name) {
       await $.ui.open({ id: PANE, title: 'Flows' }).catch(() => undefined)
@@ -946,6 +1053,9 @@ export const register: Register = on => {
     await advance($, name)
     return { result: await directive($, name) }
   }).catch(() => ({ result: `Flows could not work out the next step. Tell the user, and do nothing more for this flow.` }))
+
+  // The session's Claude does what /flows does, from the person's own words.
+  on('tool.call', { tool: MANAGE }, async ($, e) => ({ result: await manage($, e as { action?: unknown; flow?: unknown; input?: unknown; run?: unknown; confirmed?: unknown }) })).catch(() => ({ result: 'Flows could not do that. Tell the user, and do nothing more with it.' }))
 
   // The session's Claude writes or changes a flow with the person.
   on('tool.call', { tool: DRAFT }, async ($, e) => ({ result: await authoring($, e as Proposal & { flow?: unknown; action?: unknown; agreed?: unknown }) })).catch(() => ({ result: 'Flows could not handle the draft. Tell the user, and do nothing more with it.' }))

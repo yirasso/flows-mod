@@ -21,6 +21,8 @@ Asking Claude for the same multi-step job twice gives two different jobs: other 
 
 ## How it works
 
+Ask in your own words, in any language: "open the flows", "write a flow that finds the best pages about a topic and summarises each one", "run page-summary on volcanoes", "stop it", "take it up again". The commands below do the same, for those who prefer them, and so do the buttons of the pane.
+
 ### Write it once
 
 ```
@@ -39,7 +41,7 @@ The plugin decides each step and runs the scripts itself; the session's Claude o
 
 - **Approvals** are asked in the chat: approve, reject, or send back to the agent with a note.
 - **A failed step** stops the run. Claude says what failed and proposes one fix; with your yes, it makes the fix and takes the run up again at that step.
-- **Stopping the chat stops the flow.** `/flows retry` takes it up where it stopped.
+- **Stopping the chat stops the flow**, and so does asking Claude to stop it, or the pane's Stop. Asking to take it up again (or `/flows retry`) goes on where it stopped.
 - **It works in Auto mode**, with no permission prompts along the way.
 
 ### The steps
@@ -60,6 +62,8 @@ Every agent step is a pixel crab in the costume of its role, and it moves while 
 </div>
 
 ## Commands
+
+Everything here can also be asked for in plain words; Claude does it with the plugin's `manage` tool.
 
 | Command | What it does |
 | --- | --- |

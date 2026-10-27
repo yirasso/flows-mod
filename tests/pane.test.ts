@@ -45,7 +45,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
     on('command.register', async () => ({ value: undefined }) as never)
     on('prompt.submit', async (_$: unknown, e: { text: string }) => (prompts.push(e.text), { text: e.text }) as never)
     on('prompt.fill', async (_$: unknown, e: { text: string }) => (filled.push(e.text), { isFilled: true, text: e.text, cursor: e.text.length }) as never)
-    on('tool.call', { tool: 'TaskStop' }, async (_$: unknown, e: { task_id: string }) => (stopped.push(e.task_id), { result: 'stopped' }) as never)
+    on('tool.call', { tool: 'TaskStop' }, async (_$: unknown, e: { task_id?: string }) => (stopped.push(e.task_id ?? ''), { result: 'stopped' }) as never)
 
     await $.command.run({ command: 'flows', args: 'list', origin: { kind: 'user' } } as never)
     const pane = await $.ui.mount({ plugin: 'flows', surface, component: 'Pane', requestId: 'flows', props: { bodyColumns: 60 } as never })
