@@ -34,13 +34,23 @@ for (const surface of ['terminal', 'desktop'] as const) {
 
     await $.command.run({ command: 'flows', args: 'list', origin: { kind: 'user' } } as never)
     const pane = await $.ui.mount({ plugin: 'flows', surface, component: 'Pane', requestId: 'flows', props: { bodyColumns: 60 } as never })
-    // One picker, no buttons: the flow shown is picked from it.
+    // One picker drawn by its own module, no buttons: the flow shown as a card, the others under it once opened.
+    const current = async (): Promise<unknown> => ((await pane.find({ key: 'picker' }))?.props.props as { current: unknown }).current
     expect(await pane.findAll({ type: 'Button' })).toEqual([])
-    expect(await pane.find({ key: 'flow' })).toBeDefined()
-    await pane.select({ key: 'flow', value: 'other' })
-    if (surface === 'terminal') expect((await pane.findAll({ type: 'Text' })).map(t => t.text).join(' ')).toContain('Another flow')
-    await pane.select({ key: 'flow', value: 'demo' })
-    if (surface === 'terminal') expect((await pane.findAll({ type: 'Text' })).map(t => t.text).join(' ')).toContain('A demo flow')
+    expect(await current()).toBe('demo')
+    expect(await pane.find({ key: 'shown:demo', in: 'picker' })).toBeDefined()
+    expect(await pane.find({ key: 'item:other', in: 'picker' })).toBeUndefined()
+    await pane.pointer({ type: 'down', x: 3, y: 0, button: 'left' })
+    expect(await pane.find({ key: 'item:other', in: 'picker' })).toBeDefined()
+    // The first card under the shown one starts at row 2.
+    await pane.pointer({ type: 'down', x: 3, y: 2, button: 'left' })
+    expect(await current()).toBe('other')
+    expect(await pane.find({ key: 'shown:other', in: 'picker' })).toBeDefined()
+    expect(await pane.find({ key: 'item:demo', in: 'picker' })).toBeUndefined()
+    // The keyboard does the same: Enter opens, Enter picks.
+    await pane.key({ key: 'return', in: 'picker' })
+    await pane.key({ key: 'return', in: 'picker' })
+    expect(await current()).toBe('demo')
   })
 }
 

@@ -10,6 +10,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Draft, Flow, FlowStep, Run, StepRun, Track, View } from '../types'
 import { check, flowJson, guide, presented, sameShape } from './author'
 import type { Proposal } from './author'
+import type { PickerItem, PickerProps } from './picker'
 import { BASE_TOOLS, NAME, READ_TOOLS, WRITE_TOOLS, agentBefore, agentStep, claim, finish, flowDir, halt, inFile, inside, itemsOf, labelOf, newRun, outFile, parseFlow, pending, promote, resultFile, retry, runDir, sendBack, settle, split, tokensOf } from './flow'
 import type { Outcome } from './flow'
 import { header as drawHeader, item as drawItem, row as drawRow } from './draw'
@@ -568,23 +569,29 @@ function actsOf($: EngineInterface): Acts {
 /** How long ago, in a few characters. */
 const ago = (ms: number): string => (ms < 60_000 ? 'just now' : ms < 3_600_000 ? `${Math.floor(ms / 60_000)} min ago` : ms < 86_400_000 ? `${Math.floor(ms / 3_600_000)} h ago` : `${Math.floor(ms / 86_400_000)} d ago`)
 
+const TONE: Record<string, string> = { running: '#D97757', waiting: '#D9962B', done: '#2E9E6B', failed: '#D8443C' }
+
 /** The pane's only control: a picker of the flow shown, the ones running or waiting first, then the latest run. */
 function controls(ui: Ui, acts: Acts, list: Flow[], all: Record<string, Run>, name: string | undefined, isDraft: boolean, t: number) {
   const { Box, Button } = ui
-  // A Select needs one option at least: a first flow still a draft has none to pick.
+  // A first flow still a draft has nothing to pick.
   if (list.length === 0) return null
+  const rank = (f: Flow): number => (active(all[f.name]) ? Infinity : (all[f.name]?.startedAt ?? -Infinity))
+  const items: PickerItem[] = [...list]
+    .sort((a, b) => rank(b) - rank(a) || a.name.localeCompare(b.name))
+    .map(f => {
+      const r = all[f.name]
+      const when = !r ? 'not run yet' : active(r) ? r.status : `${r.status} · ${ago(Math.max(0, t - (r.endedAt ?? r.startedAt)))}`
+      return { name: f.name, description: f.description, glyph: GLYPH[r?.status ?? 'pending'] ?? '–', color: TONE[r?.status ?? ''] ?? '#8A8A86', when }
+    })
+  const current = name && !isDraft ? name : null
+  // Drawn on the surface itself (picker.tsx); a pick comes back as a ui.message.
+  if ('Client' in ui) return <ui.Client key="picker" module="./picker.tsx" props={{ current, items } satisfies PickerProps} width="100%" />
   if ('Select' in ui) {
-    const rank = (f: Flow): number => (active(all[f.name]) ? Infinity : (all[f.name]?.startedAt ?? -Infinity))
-    const options = [...list]
-      .sort((a, b) => rank(b) - rank(a) || a.name.localeCompare(b.name))
-      .map(f => {
-        const r = all[f.name]
-        const when = !r ? 'not run yet' : active(r) ? r.status : `${r.status} · ${ago(Math.max(0, t - (r.endedAt ?? r.startedAt)))}`
-        return { value: f.name, label: `${GLYPH[r?.status ?? 'pending'] ?? GLYPH.ended} ${f.name} · ${when}` }
-      })
-    return <ui.Select key="flow" label="Flow" options={options} {...(name && !isDraft ? { value: name } : {})} onSelect={value => void acts.show(value)} />
+    const options = items.map(i => ({ value: i.name, label: `${i.glyph} ${i.name} · ${i.when}` }))
+    return <ui.Select key="flow" label="Flow" options={options} {...(current ? { value: current } : {})} onSelect={value => void acts.show(value)} />
   }
-  // The mobile app draws no Select: a button per flow.
+  // The mobile app draws neither: a button per flow.
   return (
     <Box key="flows" flexDirection="row" flexWrap="wrap" gap={1}>
       {list.map(f => (
@@ -982,6 +989,14 @@ export const register: Register = on => {
         {below}
       </Box>
     )
+  })
+
+  // A flow picked in the pane's picker (picker.tsx).
+  on('ui.message', async ($, e, next) => {
+    const data = e.data as { show?: unknown } | null
+    if (e.element !== 'picker' || typeof data?.show !== 'string') return next(e)
+    await actsOf($).show(data.show)
+    return {}
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => pane($.ui.resolve(e), actsOf($), await read($, flows), await read($, runs), await read($, view), await read($, now), e.surface === 'desktop', e.props.bodyColumns ?? 0, await read($, past), await read($, draft)))

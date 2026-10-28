@@ -80,7 +80,7 @@ A name takes lower-case letters, digits and hyphens.
 
 ## The pane
 
-At the top, a **Flow** picker: the flows running or waiting on you first, then the latest run, each with how its last run went and when. Picking one shows it. Everything else (running, stopping, writing, approving) is asked in the chat. Then: the flow and its run, three tiles (what the run took of your weekly limit, its tokens, its time), and one row per step with its state, its time and tokens, and the first line of its result. The items of a for-each sit under their step. In a terminal the pane is text.
+At the top, the flow shown as a card (how its last run went, and when); click it, or press Enter, and the other flows open under it, the ones running or waiting on you first. Picking one shows it. Everything else (running, stopping, writing, approving) is asked in the chat. Then: the flow and its run, three tiles (what the run took of your weekly limit, its tokens, its time), and one row per step with its state, its time and tokens, and the first line of its result. The items of a for-each sit under their step. In a terminal the pane is text.
 
 ## Where flows live
 
@@ -185,6 +185,7 @@ Load your working copy with `claude --plugin-dir <path to the clone>`.
 | `hooks/flow.ts` | The rules of a flow and of a run |
 | `hooks/author.ts` | What Claude is told when writing a flow, and the check of what it proposes |
 | `hooks/draw.ts` | The pane's drawings |
+| `hooks/picker.tsx` | The pane's flow picker, drawn on the surface itself |
 | `types/index.d.ts` | The plugin's state contract |
 | `tests/` | Tests for the rules, a whole run, and writing a flow |
 
