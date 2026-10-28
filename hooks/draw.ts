@@ -247,14 +247,12 @@ export type HeaderData = {
   week: string
   tokens: string
   time: string
-  /** The weekly limit's percent used now, or null when the session does not say. */
-  limit: number | null
   /** Why the run ended early, or what is wrong with the flow. */
   note: string
   isError: boolean
 }
 
-/** The top of the pane: the flow, its run, three tiles and the weekly limit. */
+/** The top of the pane: the flow, its run and three tiles. */
 export function header(w: number, d: HeaderData): { source: string; height: number } {
   const lines = d.description ? wrap(d.description, 12, w, 2) : []
   let y = 16
@@ -275,16 +273,6 @@ export function header(w: number, d: HeaderData): { source: string; height: numb
     out += text(x + 10, y + 36, 15, 't', value ?? '', ' font-weight="600" font-variant-numeric="tabular-nums"')
   }
   y += 46
-  if (d.limit !== null) {
-    const used = Math.max(0, Math.min(100, d.limit))
-    y += 20
-    out += text(0, y, 11, 's', 'Weekly limit')
-    out += text(w, y, 11, 's', `${Math.round(used)}% used`, END)
-    y += 7
-    out += `<rect class="k" x="0" y="${y}" width="${w}" height="4" rx="2"/>`
-    out += `<rect x="0" y="${y}" width="${Math.max(used > 0 ? 4 : 0, (w * used) / 100)}" height="4" rx="2" fill="${used >= 85 ? RED : used >= 65 ? AMBER : CLAY}"/>`
-    y += 4
-  }
   if (d.note) out += text(0, (y += 19), 11, 's', fit(d.note, 11, w), d.isError ? ` style="fill:${RED}"` : '')
   return { source: svg(w, y + 6, out), height: y + 6 }
 }

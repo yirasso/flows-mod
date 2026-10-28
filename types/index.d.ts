@@ -105,12 +105,8 @@ declare module 'claude-code' {
       now: number
       /** The earlier run the pane shows, read from disk. */
       past: Run | null
-      /** The weekly limit's percent used, as the session last said. */
-      limit: number | null
       me: string
       draft: Draft | null
-      /** What the person typed in the pane's input field, by flow: the input its Run button starts it with. */
-      typed: Record<string, string>
     }
   }
 }

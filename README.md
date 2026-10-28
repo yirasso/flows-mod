@@ -21,7 +21,7 @@ Asking Claude for the same multi-step job twice gives two different jobs: other 
 
 ## How it works
 
-Ask in your own words, in any language: "open the flows", "write a flow that finds the best pages about a topic and summarises each one", "run page-summary on volcanoes", "stop it", "take it up again". The commands below do the same, for those who prefer them, and so do the buttons of the pane.
+Ask in your own words, in any language: "open the flows", "write a flow that finds the best pages about a topic and summarises each one", "run page-summary on volcanoes", "stop it", "take it up again". The commands below do the same, for those who prefer them.
 
 ### Write it once
 
@@ -41,7 +41,7 @@ The plugin decides each step and runs the scripts itself; the session's Claude o
 
 - **Approvals** are asked in the chat: approve, reject, or send back to the agent with a note.
 - **A failed step** stops the run. Claude says what failed and proposes one fix; with your yes, it makes the fix and takes the run up again at that step.
-- **Stopping the chat stops the flow**, and so does asking Claude to stop it, or the pane's Stop. Asking to take it up again (or `/flows retry`) goes on where it stopped.
+- **Stopping the chat stops the flow**, and so does asking Claude to stop it. Asking to take it up again (or `/flows retry`) goes on where it stopped.
 - **It works in Auto mode**, with no permission prompts along the way.
 
 ### The steps
@@ -80,7 +80,7 @@ A name takes lower-case letters, digits and hyphens.
 
 ## The pane
 
-The pane's buttons do what the commands do. At the top, one button per flow (its dot says how its last run went) and **+ New flow**; under them, for the flow shown, a field for its input with **▶ Run**, **■ Stop** while it runs, **↻ Retry** after it failed or stopped, **Edit**, and **‹ Older run** / **Newer run ›**. New and Edit put the command in the prompt box for you to finish, since writing a flow is a conversation; approvals are answered in the chat. Then: the flow and its run, three tiles (what the run took of your weekly limit, its tokens, its time), the weekly limit, and one row per step with its state, its time and tokens, and the first line of its result. The items of a for-each sit under their step. In a terminal the pane is text.
+At the top, one button per flow (its dot says how its last run went): pressing one shows that flow. Everything else (running, stopping, writing, approving) is asked in the chat. Then: the flow and its run, three tiles (what the run took of your weekly limit, its tokens, its time), and one row per step with its state, its time and tokens, and the first line of its result. The items of a for-each sit under their step. In a terminal the pane is text.
 
 ## Where flows live
 

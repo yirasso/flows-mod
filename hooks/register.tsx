@@ -28,10 +28,8 @@ const runs = atom({ plugin: 'flows', key: 'runs' } as const, {})
 const view = atom({ plugin: 'flows', key: 'view' } as const, { flow: null })
 const now = atom({ plugin: 'flows', key: 'now' } as const, 0)
 const past = atom({ plugin: 'flows', key: 'past' } as const, null)
-const limit = atom({ plugin: 'flows', key: 'limit' } as const, null)
 const me = atom({ plugin: 'flows', key: 'me' } as const, '')
 const draft = atom({ plugin: 'flows', key: 'draft' } as const, null)
-const typed = atom({ plugin: 'flows', key: 'typed' } as const, {})
 
 /** How often the timer looks at the flows folder, the time limits and the heartbeat. */
 /** The first words of /flows that are not a flow's name; a flow cannot be called by one. */
@@ -557,72 +555,24 @@ type Ui = ReturnType<EngineInterface['ui']['resolve']>
 /** What the pane's buttons and its input field do. Each reads the state it needs when pressed, never at draw time. */
 type Acts = {
   show: (name: string) => Promise<void>
-  showRun: (name: string, id: number) => Promise<void>
-  run: (name: string, input?: string) => Promise<void>
-  retry: (name: string) => Promise<void>
-  stop: (name: string) => Promise<void>
-  type: (name: string, text: string) => Promise<void>
-  /** Puts a /flows command in the prompt box for the person to finish: writing a flow is a conversation. */
-  write: (text: string) => Promise<void>
 }
 
 function actsOf($: EngineInterface): Acts {
-  // A run or a retry that did not start says why; one that did shows in the pane.
-  const started = async (name: string, said: string): Promise<void> => {
-    if (!active((await read($, runs))[name])) $.ui.toast(said)
-  }
   return {
     show: async name => {
       await update($, view, () => ({ flow: name }))
     },
-    showRun: async (name, id) => {
-      const why = await showRun($, name, id)
-      if (why) $.ui.toast(why)
-    },
-    run: async (name, input) => {
-      const text = input ?? (await read($, typed))[name] ?? ''
-      await started(name, await startRun($, name, text.trim()))
-      if (active((await read($, runs))[name])) await update($, typed, all => ({ ...all, [name]: '' }))
-    },
-    retry: async name => started(name, await retryRun($, name)),
-    stop: name => stopRun($, name),
-    type: async (name, text) => {
-      await update($, typed, all => ({ ...all, [name]: text }))
-    },
-    write: async text => {
-      const filled = await $.prompt.fill({ text, mode: 'replace' }).catch(() => null)
-      if (!filled?.isFilled) $.ui.toast(`Type ${text.trim()} … in the chat`)
-    },
   }
 }
 
-/** The pane's controls: one button per flow, then what can be done with the one shown. */
-function controls(ui: Ui, acts: Acts, list: Flow[], all: Record<string, Run>, flow: Flow | undefined, shown: Run | undefined, text: string, mine: string, isDraft: boolean) {
+/** The pane's only controls: one button per flow, to pick the one shown. */
+function controls(ui: Ui, acts: Acts, list: Flow[], all: Record<string, Run>, name: string | undefined, isDraft: boolean) {
   const { Box, Button } = ui
-  const name = flow?.name
-  const newest = name ? all[name] : undefined
-  const isActive = active(newest)
-  const canRun = Boolean(flow && !isDraft && !isActive && !flow.error)
-  const at = shown?.id ?? 0
   return (
-    <Box flexDirection="column" gap={1}>
-      <Box key="flows" flexDirection="row" flexWrap="wrap" gap={1}>
-        {list.map(f => (
-          <Button key={`flow:${f.name}`} label={`${GLYPH[all[f.name]?.status ?? 'pending'] ?? GLYPH.ended} ${f.name}`} variant={f.name === name && !isDraft ? 'primary' : undefined} onPress={() => acts.show(f.name)} />
-        ))}
-        <Button key="new" label="+ New flow" dimColor onPress={() => acts.write('/flows new ')} />
-      </Box>
-      {name && !isDraft && (
-        <Box key="actions" flexDirection="row" flexWrap="wrap" gap={1} alignItems="center">
-          {canRun && 'Input' in ui && <ui.Input key="input" placeholder="Input (optional)" value={text} submitLabel="Run" onInput={value => void acts.type(name, value)} onSubmit={value => void acts.run(name, value)} />}
-          {canRun && <Button key="run" label="▶ Run" variant="primary" onPress={() => acts.run(name)} />}
-          {isActive && newest?.owner === mine && <Button key="stop" label="■ Stop" onPress={() => acts.stop(name)} />}
-          {newest && !isActive && newest.status !== 'done' && <Button key="retry" label="↻ Retry" onPress={() => acts.retry(name)} />}
-          <Button key="edit" label="Edit" dimColor onPress={() => acts.write(`/flows edit ${name} `)} />
-          {at > 1 && <Button key="older" label="‹ Older run" dimColor onPress={() => acts.showRun(name, at - 1)} />}
-          {newest && at > 0 && at < newest.id && <Button key="newer" label="Newer run ›" dimColor onPress={() => acts.showRun(name, at + 1)} />}
-        </Box>
-      )}
+    <Box key="flows" flexDirection="row" flexWrap="wrap" gap={1}>
+      {list.map(f => (
+        <Button key={`flow:${f.name}`} label={`${GLYPH[all[f.name]?.status ?? 'pending'] ?? GLYPH.ended} ${f.name}`} variant={f.name === name && !isDraft ? 'primary' : undefined} onPress={() => acts.show(f.name)} />
+      ))}
     </Box>
   )
 }
@@ -643,20 +593,15 @@ function meter(s: StepRun | undefined, t: number): string {
   return s.tokens ? `${time} · ${count(s.tokens)}` : time
 }
 
-function pane(ui: Ui, acts: Acts, list: Flow[], all: Record<string, Run>, v: View, t: number, isDesktop: boolean, cols: number, weekLimit: number | null, old: Run | null, drafted: Draft | null, typedBy: Record<string, string>, mine: string) {
-  const { Box, Text, Button } = ui
+function pane(ui: Ui, acts: Acts, list: Flow[], all: Record<string, Run>, v: View, t: number, isDesktop: boolean, cols: number, old: Run | null, drafted: Draft | null) {
+  const { Box, Text } = ui
   // A flow being written shows in place of the chosen one, until it is saved or dropped.
   const isDraft = Boolean(drafted?.flow)
   if (list.length === 0 && !isDraft) {
     return (
-      <Box flexDirection="column" gap={1}>
-        <Box flexDirection="column">
-          <Text bold>No flows yet</Text>
-          <Text dimColor>This project has no flows yet. Describe one in the chat and Claude writes it with you, in its Flows folder.</Text>
-        </Box>
-        <Box>
-          <Button key="new" label="+ New flow" variant="primary" onPress={() => acts.write('/flows new ')} />
-        </Box>
+      <Box flexDirection="column">
+        <Text bold>No flows yet</Text>
+        <Text dimColor>This project has no flows yet. Describe one in the chat and Claude writes it with you, in its Flows folder.</Text>
       </Box>
     )
   }
@@ -672,7 +617,7 @@ function pane(ui: Ui, acts: Acts, list: Flow[], all: Record<string, Run>, v: Vie
   const items = run?.tracks.slice(1) ?? []
   const each = steps.findIndex(s => s.type === 'each')
   const week = run && run.weekStart != null && run.weekEnd != null ? Math.max(0, run.weekEnd - run.weekStart) : null
-  const top = controls(ui, acts, list, all, flow, run, typedBy[name] ?? '', mine, isDraft)
+  const top = controls(ui, acts, list, all, name, isDraft)
 
   // The desktop app draws: a header, then one picture per step and per item.
   if (isDesktop && 'Svg' in ui) {
@@ -690,7 +635,6 @@ function pane(ui: Ui, acts: Acts, list: Flow[], all: Record<string, Run>, v: Vie
       week: !run ? '—' : week === null ? '…' : week < 0.1 ? '< 0.1%' : `≈ ${week.toFixed(1)}%`,
       tokens: run ? count(tokensOf(run)) : '—',
       time: run ? clock(Math.max(0, (run.endedAt ?? Math.max(t, run.startedAt)) - run.startedAt)) : '—',
-      limit: weekLimit,
       note: isDraft ? DRAFTED : flow.error ? `This flow cannot run: ${flow.error}` : (run?.ended ?? (run ? '' : 'Not run yet.')),
       isError: Boolean(flow.error),
     })
@@ -911,8 +855,6 @@ export const register: Register = on => {
         isDeferred: false,
       })
       .catch(() => undefined)
-    const week = await weekUsed($)
-    await update($, limit, () => week)
     await $.tool
       .register({
         name: 'draft',
@@ -958,13 +900,6 @@ export const register: Register = on => {
       .catch(() => undefined)
     await loadFlows($).catch(() => undefined)
     $.clock.every(TICK, () => void tick($).catch(() => undefined))
-    return next(e)
-  })
-
-  // The weekly limit moves: the pane's bar follows it.
-  on('session.measure', async ($, e, next) => {
-    const week = e.changed.includes('rateLimits') ? e.rateLimits.find(l => l.kind === 'seven_day')?.percentUsed : undefined
-    if (week !== undefined) await update($, limit, () => week)
     return next(e)
   })
 
@@ -1032,7 +967,7 @@ export const register: Register = on => {
     )
   })
 
-  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => pane($.ui.resolve(e), actsOf($), await read($, flows), await read($, runs), await read($, view), await read($, now), e.surface === 'desktop', e.props.bodyColumns ?? 0, await read($, limit), await read($, past), await read($, draft), await read($, typed), await read($, me)))
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => pane($.ui.resolve(e), actsOf($), await read($, flows), await read($, runs), await read($, view), await read($, now), e.surface === 'desktop', e.props.bodyColumns ?? 0, await read($, past), await read($, draft)))
 
   // The session's Claude asks what to do next, and brings the person's answer to an approval.
   on('tool.call', { tool: TOOL }, async ($, e) => {
