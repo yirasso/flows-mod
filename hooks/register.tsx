@@ -565,9 +565,26 @@ function actsOf($: EngineInterface): Acts {
   }
 }
 
-/** The pane's only controls: one button per flow, to pick the one shown. */
-function controls(ui: Ui, acts: Acts, list: Flow[], all: Record<string, Run>, name: string | undefined, isDraft: boolean) {
+/** How long ago, in a few characters. */
+const ago = (ms: number): string => (ms < 60_000 ? 'just now' : ms < 3_600_000 ? `${Math.floor(ms / 60_000)} min ago` : ms < 86_400_000 ? `${Math.floor(ms / 3_600_000)} h ago` : `${Math.floor(ms / 86_400_000)} d ago`)
+
+/** The pane's only control: a picker of the flow shown, the ones running or waiting first, then the latest run. */
+function controls(ui: Ui, acts: Acts, list: Flow[], all: Record<string, Run>, name: string | undefined, isDraft: boolean, t: number) {
   const { Box, Button } = ui
+  // A Select needs one option at least: a first flow still a draft has none to pick.
+  if (list.length === 0) return null
+  if ('Select' in ui) {
+    const rank = (f: Flow): number => (active(all[f.name]) ? Infinity : (all[f.name]?.startedAt ?? -Infinity))
+    const options = [...list]
+      .sort((a, b) => rank(b) - rank(a) || a.name.localeCompare(b.name))
+      .map(f => {
+        const r = all[f.name]
+        const when = !r ? 'not run yet' : active(r) ? r.status : `${r.status} · ${ago(Math.max(0, t - (r.endedAt ?? r.startedAt)))}`
+        return { value: f.name, label: `${GLYPH[r?.status ?? 'pending'] ?? GLYPH.ended} ${f.name} · ${when}` }
+      })
+    return <ui.Select key="flow" label="Flow" options={options} {...(name && !isDraft ? { value: name } : {})} onSelect={value => void acts.show(value)} />
+  }
+  // The mobile app draws no Select: a button per flow.
   return (
     <Box key="flows" flexDirection="row" flexWrap="wrap" gap={1}>
       {list.map(f => (
@@ -617,7 +634,7 @@ function pane(ui: Ui, acts: Acts, list: Flow[], all: Record<string, Run>, v: Vie
   const items = run?.tracks.slice(1) ?? []
   const each = steps.findIndex(s => s.type === 'each')
   const week = run && run.weekStart != null && run.weekEnd != null ? Math.max(0, run.weekEnd - run.weekStart) : null
-  const top = controls(ui, acts, list, all, name, isDraft)
+  const top = controls(ui, acts, list, all, name, isDraft, t)
 
   // The desktop app draws: a header, then one picture per step and per item.
   if (isDesktop && 'Svg' in ui) {

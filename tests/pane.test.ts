@@ -4,9 +4,9 @@ const ROOT = 'C:/P/Flows'
 const flow = (description: string) => JSON.stringify({ description, steps: [{ id: 'research', type: 'agent', name: 'Research', model: 'haiku', instruction: 'Find facts about the input.' }] })
 const slash = (path: string): string => path.replace(/\\/g, '/')
 
-// The pane's only buttons pick the flow shown; everything else is asked in the chat.
+// The pane's only control picks the flow shown; everything else is asked in the chat.
 for (const surface of ['terminal', 'desktop'] as const) {
-  test(`the pane has one button per flow, and pressing one shows it (${surface})`, async ($, on) => {
+  test(`the pane picks the flow shown from one picker (${surface})`, async ($, on) => {
     const files = new Map<string, string>([
       [`${ROOT}/demo/flow.json`, flow('A demo flow')],
       [`${ROOT}/other/flow.json`, flow('Another flow')],
@@ -34,16 +34,17 @@ for (const surface of ['terminal', 'desktop'] as const) {
 
     await $.command.run({ command: 'flows', args: 'list', origin: { kind: 'user' } } as never)
     const pane = await $.ui.mount({ plugin: 'flows', surface, component: 'Pane', requestId: 'flows', props: { bodyColumns: 60 } as never })
-    const keys = async (): Promise<string[]> => (await pane.findAll({ type: 'Button' })).map(b => String(b.key))
-    expect(await keys()).toEqual(['flow:demo', 'flow:other'])
-    expect(await pane.find({ type: 'Input' })).toBeUndefined()
-    await pane.press({ key: 'flow:other' })
+    // One picker, no buttons: the flow shown is picked from it.
+    expect(await pane.findAll({ type: 'Button' })).toEqual([])
+    expect(await pane.find({ key: 'flow' })).toBeDefined()
+    await pane.select({ key: 'flow', value: 'other' })
     if (surface === 'terminal') expect((await pane.findAll({ type: 'Text' })).map(t => t.text).join(' ')).toContain('Another flow')
-    expect(await keys()).toEqual(['flow:demo', 'flow:other'])
+    await pane.select({ key: 'flow', value: 'demo' })
+    if (surface === 'terminal') expect((await pane.findAll({ type: 'Text' })).map(t => t.text).join(' ')).toContain('A demo flow')
   })
 }
 
-test('with no flows, the pane says how to write one, with no buttons', async ($, on) => {
+test('with no flows, the pane says how to write one, with no controls', async ($, on) => {
   on('session.cwd', async () => ({ value: 'C:\\P' }) as never)
   on('fs.list', async () => ({ value: [] }) as never)
   const pane = await $.ui.mount({ plugin: 'flows', surface: 'desktop', component: 'Pane', requestId: 'flows', props: { bodyColumns: 60 } as never })

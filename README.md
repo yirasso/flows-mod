@@ -80,7 +80,7 @@ A name takes lower-case letters, digits and hyphens.
 
 ## The pane
 
-At the top, one button per flow (its dot says how its last run went): pressing one shows that flow. Everything else (running, stopping, writing, approving) is asked in the chat. Then: the flow and its run, three tiles (what the run took of your weekly limit, its tokens, its time), and one row per step with its state, its time and tokens, and the first line of its result. The items of a for-each sit under their step. In a terminal the pane is text.
+At the top, a **Flow** picker: the flows running or waiting on you first, then the latest run, each with how its last run went and when. Picking one shows it. Everything else (running, stopping, writing, approving) is asked in the chat. Then: the flow and its run, three tiles (what the run took of your weekly limit, its tokens, its time), and one row per step with its state, its time and tokens, and the first line of its result. The items of a for-each sit under their step. In a terminal the pane is text.
 
 ## Where flows live
 
