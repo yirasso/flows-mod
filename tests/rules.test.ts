@@ -1,6 +1,8 @@
 import { expect, test } from 'claude-code/testing'
 
-import { claim, finish, halt, inside, itemsOf, newRun, parseFlow, retry, sendBack, settle } from '../hooks/flow'
+import type { FlowInput, JsonSchema } from '../types'
+import { changes, whole } from '../hooks/author'
+import { claim, fill, finish, halt, inside, itemsOf, jsonOf, labelOf, misfits, newRun, parseFlow, retry, sample, sendBack, settle, varsOf } from '../hooks/flow'
 
 const flow = (steps: unknown[]) => parseFlow('demo', JSON.stringify({ description: 'd', steps }))
 
@@ -50,4 +52,31 @@ test('send back returns to the agent before the approval, with the note', async 
   expect(d?.tracks[0]?.at).toBe(0)
   expect(d?.tracks[0]?.steps[0]).toEqual({ status: 'pending', note: 'shorter', tokens: 5 })
   expect(d?.tracks[0]?.steps[1]).toBeUndefined()
+})
+
+test("a step's result is checked against its schema, and a test run makes one up that fits", async () => {
+  const schema: JsonSchema = { type: 'array', items: { type: 'object', required: ['name'], properties: { name: { type: 'string' }, rating: { type: 'number', maximum: 5 } } }, minItems: 1 }
+  expect(misfits(jsonOf('```json\n[{"name":"A","rating":4}]\n```'), schema)).toEqual([])
+  expect(misfits(jsonOf('[{"rating":9}]'), schema)).toEqual(['the result[0] has no "name"', 'the result[0].rating should be at most 5'])
+  expect(misfits(jsonOf('not json'), schema)).toEqual(['the result should be of type array, not missing'])
+  expect(misfits(sample(schema, 'leads'), schema)).toEqual([])
+  expect(fill('{{name}} · {{site.url}} · {{none}}', { name: 'A', site: { url: 'a.html' } })).toBe('A · a.html · {{none}}')
+  expect(labelOf('{"name":"Padaria Sol","rating":4}')).toBe('Padaria Sol')
+})
+
+test("a flow's inputs are taken in their types, with their defaults", async () => {
+  const inputs: FlowInput[] = [{ id: 'niche', required: true }, { id: 'count', type: 'number', default: 3 }, { id: 'zones', type: 'list' }]
+  expect(varsOf(inputs, { niche: 'bakeries', zones: 'Lisboa, Porto' })).toEqual({ vars: { niche: 'bakeries', count: 3, zones: ['Lisboa', 'Porto'] } })
+  expect(varsOf(inputs, { niche: 'x', count: 'many' })).toEqual({ error: '"count" should be a number, not "many"' })
+  expect(varsOf(inputs, {})).toEqual({ error: '"niche" is needed' })
+})
+
+test('a patch changes only the steps it names, and the change is said step by step', async () => {
+  const before = flow([{ id: 'a', type: 'agent', name: 'A', instruction: 'x', model: 'sonnet' }, { id: 'b', type: 'approval', name: 'B' }])
+  const made = whole({ patch: [{ id: 'a', model: 'opus' }, { id: 'c', type: 'agent', name: 'C', instruction: 'y', after: 'a' }], remove: ['b'] }, before)
+  if ('error' in made) throw new Error(made.error)
+  const after = parseFlow('demo', JSON.stringify(made))
+  expect(after.steps.map(s => s.id)).toEqual(['a', 'c'])
+  expect(changes(before, after)).toEqual(['removed step "b" (B)', 'changed "a": model sonnet → opus', 'added step 2 "c" (agent, C)'])
+  expect(whole({ patch: [{ id: 'x', after: 'nope' }] }, before)).toEqual({ error: 'There is no step "nope" to add "x" after.' })
 })

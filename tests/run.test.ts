@@ -3,6 +3,8 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Run } from '../types'
 
 const ROOT = 'C:/P/Flows'
+/** The flows are kept in ~/.claude/flows; a run's files go to the session's folder (C:\P). */
+const HOME = 'C:/H/.claude/flows'
 const FLOW = {
   description: 'A test flow',
   steps: [
@@ -25,12 +27,13 @@ const until = async (done: () => boolean): Promise<void> => {
 test('the session\'s Claude runs a flow through the next tool: agents, code, an approval, a for-each and a retry', async ($, on) => {
   // The test stands in for the engine (files in memory, agents that start and wait to be answered) and for
   // the session's Claude (it calls the tool and starts the agents the answer names).
-  const files = new Map<string, string>([[`${ROOT}/demo/flow.json`, JSON.stringify(FLOW)]])
+  const files = new Map<string, string>([[`${HOME}/demo/flow.json`, JSON.stringify(FLOW)]])
   const spawned: { id: string; prompt: string; type: string; description: string; cwd: string }[] = []
   const ran: { argv: readonly string[]; stdin: string }[] = []
   const prompts: string[] = []
   // The session's folder is the project; its flows are in its Flows folder.
   on('session.cwd', async () => ({ value: 'C:\\P' }) as never)
+  on('env.get', async (_$: unknown, e: { name: string }) => ({ value: e.name === 'USERPROFILE' ? 'C:\\H' : undefined }) as never)
   const time = mock.clock(on)
   on('fs.read', async (_$: unknown, e: { path: string }) => {
     const text = files.get(slash(e.path))
@@ -99,7 +102,7 @@ test('the session\'s Claude runs a flow through the next tool: agents, code, an 
   // The tool names the first agent; started, it gets the step's real task and the run's folder.
   let told = await next()
   expect(told).toContain('subagent_type: "flows:demo-research"')
-  expect(told).toContain('description: "demo #1 [0.0] Research"')
+  expect(told).toContain('description: "demo #1 · step 1: Research"')
   await start(told, 'three facts')
   expect(spawned[0]?.prompt).toContain('Find facts about the input.')
   expect(spawned[0]?.prompt).toContain('volcanoes')
@@ -107,7 +110,7 @@ test('the session\'s Claude runs a flow through the next tool: agents, code, an 
   expect(spawned[0]?.cwd).toBe('C:/P')
 
   // An agent that is no step waiting to start is refused.
-  expect(((await $.agent.spawn({ subagentType: 'flows:demo-research', description: 'demo #1 [0.0] Research', prompt: 'x' } as never)) as { deny?: string }).deny).toContain('not a step waiting')
+  expect(((await $.agent.spawn({ subagentType: 'flows:demo-research', description: 'demo #1 · step 1: Research', prompt: 'x' } as never)) as { deny?: string }).deny).toContain('not a step waiting')
 
   // The report the agent handed back (not its last message) is the script's input, and the script's output waits at the approval.
   told = await next()
@@ -115,7 +118,8 @@ test('the session\'s Claude runs a flow through the next tool: agents, code, an 
   expect(slash(ran[0]?.argv.join(' ') ?? '')).toContain('demo/steps/format.js')
   expect(JSON.parse(ran[0]?.stdin ?? '{}').input).toBe('three facts')
   expect(run().status).toBe('waiting')
-  expect(told).toContain('["one","two"]')
+  // JSON is laid out for the person to read.
+  expect(told).toContain('[\n  "one",\n  "two"\n]')
   expect(told).toContain('"Send back"')
 
   // The pane says where the answer is wanted; the approval itself is answered in the chat. While the run

@@ -26,10 +26,56 @@ export type FlowStep = {
   seconds?: number
   /** Each: how many items run at once (default 3). */
   parallel?: number
+  /** Each: the most items it takes; more are cut, with a warning on the run. */
+  max?: number
+  /** Agent or code: the shape its result must have, as a JSON Schema (type, properties, required, items, enum, min/max). */
+  schema?: JsonSchema
+  /** Agent with a schema: how many times it is asked again when its result does not fit (default 2). */
+  retries?: number
+  /** Agent: the most tokens it may use; past them the step fails. */
+  maxTokens?: number
+  /** Approval: what the person is shown, with {{field}} (or {{a.b}}) taken from the JSON it receives. */
+  show?: string
+  /** Agent or code: its result is added to the flow's memory, which every later run can read. */
+  remember?: boolean
 }
 
-/** A saved flow: `~/Flows/<name>/flow.json`, or what is wrong with that file. */
-export type Flow = { name: string; description: string; cwd?: string; steps: FlowStep[]; error?: string }
+/** The part of JSON Schema a step's result is checked against. */
+export type JsonSchema = {
+  type?: 'string' | 'number' | 'integer' | 'boolean' | 'object' | 'array' | 'null'
+  properties?: Record<string, JsonSchema>
+  required?: string[]
+  items?: JsonSchema
+  enum?: unknown[]
+  minItems?: number
+  maxItems?: number
+  minLength?: number
+  minimum?: number
+  maximum?: number
+}
+
+/** One input a flow asks for when it starts. */
+export type FlowInput = {
+  id: string
+  description?: string
+  /** `string` by default; `list` is a list of strings. */
+  type?: 'string' | 'number' | 'boolean' | 'list'
+  required?: boolean
+  default?: string | number | boolean | string[]
+}
+
+/** A saved flow: `~/.claude/flows/<name>/flow.json`, or what is wrong with that file. */
+export type Flow = {
+  name: string
+  description: string
+  cwd?: string
+  /** What it asks for when it starts; its run's input is then these values, as JSON. */
+  inputs?: FlowInput[]
+  /** The most tokens a run may use; past them it stops. */
+  maxTokens?: number
+  steps: FlowStep[]
+  error?: string
+}
 
 export type StepStatus = 'pending' | 'running' | 'waiting' | 'done' | 'failed'
 
@@ -46,6 +92,8 @@ export type StepRun = {
   error?: string
   /** The note it was sent back with. */
   note?: string
+  /** How many times its agent was asked again because its result did not fit the step's schema. */
+  tries?: number
 }
 
 /** One path through the steps: the main one, or one item of a for-each. */
@@ -63,7 +111,7 @@ export type Track = {
 
 export type RunStatus = 'running' | 'waiting' | 'failed' | 'done' | 'stopped' | 'interrupted'
 
-/** One run of a flow: `~/Flows/<name>/runs/<id>/run.json`. */
+/** One run of a flow: `<session folder>/Flows/<name>/runs/<id>/run.json`. */
 export type Run = {
   id: number
   flow: string
@@ -79,6 +127,14 @@ export type Run = {
   tracks: Track[]
   /** Why it ended before its last step. */
   ended?: string
+  /** The values of the flow's inputs it started with. */
+  vars?: Record<string, unknown>
+  /** A test run: no agent is started (each hands on a made-up result) and approvals pass by themselves. */
+  dry?: boolean
+  /** Things the person should know about it (more items than the flow takes, a ceiling reached). */
+  warnings?: string[]
+  /** The most tokens it may use, from its flow. */
+  maxTokens?: number
   /** The weekly limit's percent used when it started and when it ended. */
   weekStart?: number | null
   weekEnd?: number | null

@@ -21,7 +21,9 @@ Asking Claude for the same multi-step job twice gives two different jobs: other 
 
 ## How it works
 
-Ask in your own words, in any language: "open the flows", "write a flow that finds the best pages about a topic and summarises each one", "run page-summary on volcanoes", "stop it", "take it up again". The commands below do the same, for those who prefer them.
+Ask in your own words, in any language: "open the flows", "write a flow that finds the best pages about a topic and summarises each one", "run page-summary on volcanoes", "try it without spending tokens", "stop it", "take it up again", "only redo the second one", "copy it to page-summary-2". The commands below do the same, for those who prefer them.
+
+A flow is written once and kept for every session, in `~/.claude/flows`. Each run's files go to the folder of the session that runs it, and its agents work there.
 
 ### Write it once
 
@@ -39,19 +41,26 @@ Claude interviews you in rounds of numbered questions, each with the answer it r
 
 The plugin decides each step and runs the scripts itself; the session's Claude only starts the agents the plugin names and puts the approvals to you. What one step hands the next travels through files, not through the chat.
 
-- **Approvals** are asked in the chat: approve, reject, or send back to the agent with a note.
-- **A failed step** stops the run. Claude says what failed and proposes one fix; with your yes, it makes the fix and takes the run up again at that step.
-- **Stopping the chat stops the flow**, and so does asking Claude to stop it. Asking to take it up again (or `/flows retry`) goes on where it stopped.
+- **Every step sees the whole run**: its own input, the run's input, the flow's inputs, the result of every step before it, and the flow's memory.
+- **Results are checked.** A step with a `schema` gets its result checked against it; one of the wrong shape goes back to its agent with what is wrong, twice by default, before the step fails.
+- **Each item goes its own way.** After a for-each, every item runs the steps after it on its own, and its approval comes as soon as it gets there.
+- **Approvals** are asked in the chat, shown the way the flow says (`show`), with where the files are and which item it is ("1 of 3"): approve, approve with your changes, approve every item waiting at once, reject, or send back to the agent with a note.
+- **A failed step** stops its item. Claude says what failed and proposes one fix; with your yes, it makes the fix and takes the run up again at that step, every failed item or only one.
+- **Stopping the chat stops the flow**, and so does asking Claude to stop it. Asking to take it up again (or `/flows retry`) goes on where it stopped; asking for a new run while one is going stops the old one first, once you say so.
+- **Test runs** (`/flows run <name> --test`, or "try it") start no agent: each agent step hands on a made-up result of its shape, the approvals pass by themselves, and the scripts run with `dry: true`. They cost no tokens.
+- **Ceilings and estimates**: `maxTokens` on a step fails it past that many tokens, on the flow stops the run; starting a run says what its last finished run took.
 - **It works in Auto mode**, with no permission prompts along the way.
 
 ### The steps
 
 | Step | What it does |
 | --- | --- |
-| `agent` | An AI worker with its own model, effort, instruction, time limit and role. |
-| `code` | A Node.js script, for work that needs no judgement. It reads `{ input, flow, run, track, runDir, cwd }` as JSON on stdin; what it prints is handed on. Exit code 3 ends the flow there. |
-| `approval` | Stops until you answer in the chat. |
-| `each` | Splits a list (JSON, or one item per line) and runs every step after it once per item, three at a time by default. One per flow. |
+| `agent` | An AI worker with its own model, effort, instruction, time limit and role; optionally a `schema` for its result, `retries`, `maxTokens`. |
+| `code` | A Node.js script, for work that needs no judgement. It reads `{ input, runInput, vars, outputs, memory, item, flow, run, track, runDir, cwd, dry }` as JSON on stdin; what it prints is handed on. Exit code 3 ends the flow there. |
+| `approval` | Stops until you answer in the chat; `show` says what you read, with `{{field}}` from the JSON it receives. |
+| `each` | Splits a list (JSON, or one item per line) and runs every step after it once per item, three at a time by default (`parallel`), at most `max` items. One per flow. |
+
+Any agent or code step can be marked `remember`: its result is added to the flow's memory, `memory.md` beside its `flow.json`, which every later run reads (the leads already found, say). A flow can list `inputs` (`{ id, description, type, required, default }`, typed `string`, `number`, `boolean` or `list`): its run's input is then those values, and Claude asks for the ones that are needed.
 
 ### The cast
 
@@ -72,29 +81,33 @@ Everything here can also be asked for in plain words; Claude does it with the pl
 | `/flows <name>` | Shows that flow in the pane. Add a number to see an earlier run: `/flows <name> 2`. |
 | `/flows new <name> <what it should do>` | Writes a new flow with you, in the chat. |
 | `/flows edit <name> <what to change>` | Changes a flow. |
-| `/flows run <name> [input]` | Runs a flow. The input is what its first step receives. |
-| `/flows retry <name>` | Takes up a run that failed or was stopped, at the step where it stopped. |
+| `/flows run <name> [input]` | Runs a flow. The input is what its first step receives, or `key=value` pairs for a flow with inputs. `--test` makes a test run, `--new` stops the run still going and starts anew. |
+| `/flows retry <name> [item]` | Takes up a run that failed or was stopped, at the step where it stopped; with a number, only that item. |
 | `/flows delete <name>` | Deletes a flow, its scripts and its runs. It says what goes first, and deletes when you repeat it with `yes`. |
 
-A name takes lower-case letters, digits and hyphens.
+A name takes lower-case letters, digits and hyphens. Copying, renaming, bringing a flow over from a folder, starting at a step and changing only some steps are asked for in plain words.
 
 ## The pane
 
-At the top, the flow shown as a card (how its last run went, and when); click it, or press Enter, and the other flows open under it, the ones running or waiting on you first. Picking one shows it. Everything else (running, stopping, writing, approving) is asked in the chat. Then: the flow and its run, three tiles (what the run took of your weekly limit, its tokens, its time), and one row per step with its state, its time and tokens, and the first line of its result. The items of a for-each sit under their step. In a terminal the pane is text.
+At the top, the flow shown as a card (how its last run went, and when); click it, or press Enter, and the other flows open under it, the ones running or waiting on you first. Picking one shows it. Everything else (running, stopping, writing, approving) is asked in the chat. Then: the flow and its run, three tiles (what the run took of your weekly limit, its tokens, its time), what you should know about the run (a test run, more items than the flow takes, a ceiling reached) and where its files are, and one row per step with its state, its time and tokens, and the first line of its result. The items of a for-each sit under their step. In a terminal the pane is text.
 
 ## Where flows live
 
-A flow belongs to a project. It is a folder in the project the session is open in, `Flows/<name>/`, with a `flow.json` and the scripts of its code steps:
+A flow is kept once, for every session, in `~/.claude/flows/<name>/`: its `flow.json`, the scripts of its code steps and its memory. Its runs go to the folder of the session that runs it, `Flows/<name>/runs/<n>/`, so each project keeps its own:
 
 ```
-Flows/
+~/.claude/flows/
   page-summary/
     flow.json
     steps/2-unique.js
+    memory.md      what its "remember" steps handed on, run after run
+
+<the session's folder>/Flows/
+  page-summary/
     runs/3/        one folder per run; the last ten are kept
 ```
 
-To use a flow in another project, copy its folder there. The flows can go in git with the project; add `Flows/*/runs/` to its `.gitignore`.
+Flows from before 0.9, kept in a project's `Flows` folder, are listed as not brought over yet; ask Claude to import them. Add `Flows/*/runs/` to a project's `.gitignore` to keep its runs out of git.
 
 <details>
 <summary>A small <code>flow.json</code></summary>
@@ -163,7 +176,8 @@ Nothing is sent anywhere else. Two things to know before you run a flow someone 
 
 ## Limits
 
-- **A flow runs inside a session.** The chat is busy while it runs, and closing the session stops it; `/flows retry` takes it up again.
+- **A flow runs inside a session.** The chat is busy while it runs, and closing the session stops it; `/flows retry` takes it up again. The session's Claude starts each agent the plugin names (a plugin cannot start agents itself in Auto mode), so every step's start passes through the chat, though not its result.
+- **A ceiling is checked when a step ends**, not while its agent works.
 - **No schedules yet.** A flow starts by hand.
 - **The week figure is approximate.** It is the weekly limit's percent used after the run minus before it, so other work in the same minutes counts too.
 - **The plugin API is early access.** Function hooks may change between Claude Code releases.

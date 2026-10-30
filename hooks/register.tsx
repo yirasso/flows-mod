@@ -2,16 +2,17 @@
 // each run's state and decides the next step; the session's own Claude carries it out: it calls the tool
 // `next`, starts the agents the answer names and puts the approvals to the person in the chat. That way a
 // flow runs under the session's permission mode like any other work (a plugin's own spawn is refused in
-// auto mode). A project's flows live in its own Flows folder, <project>/Flows/<name>/; flow.ts holds the rules.
+// auto mode). The flows live once for every session, in ~/.claude/flows/<name>/; each run's files go to the
+// folder of the session that runs it, <folder>/Flows/<name>/runs/<n>/. flow.ts holds the rules.
 
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Draft, Flow, FlowStep, Run, StepRun, Track, View } from '../types'
-import { check, flowJson, guide, presented, sameShape } from './author'
+import { changes, check, flowJson, guide, presented, sameShape, whole } from './author'
 import type { Proposal } from './author'
 import type { PickerItem, PickerProps } from './picker'
-import { BASE_TOOLS, NAME, READ_TOOLS, WRITE_TOOLS, agentBefore, agentStep, claim, finish, flowDir, halt, inFile, inside, itemsOf, labelOf, newRun, outFile, parseFlow, pending, promote, resultFile, retry, runDir, sendBack, settle, split, tokensOf } from './flow'
+import { BASE_TOOLS, NAME, READ_TOOLS, WRITE_TOOLS, again as askAgain, agentBefore, agentStep, claim, fill, finish, flowDir, fromItems, halt, inFile, inside, itemsOf, jsonOf, labelOf, misfits, newRun, outFile, parseFlow, pending, promote, resultFile, retry, runDir, sample, sendBack, settle, split, tokensOf, varsOf } from './flow'
 import type { Outcome } from './flow'
 import { header as drawHeader, item as drawItem, row as drawRow } from './draw'
 import type { Tone } from './draw'
@@ -56,22 +57,32 @@ const turnOf = new Map<string, string>()
 
 // ——— The flows folder ———
 
-/** The session's folder, the project the flows belong to; empty when the session has none. */
+/** The session's folder, where its runs' files go and its agents work; empty when the session has none. */
 async function projectDir($: EngineInterface): Promise<string> {
   return ((await $.session.cwd().catch(() => '')) ?? '').replace(/\\/g, '/').replace(/\/+$/, '')
 }
 
 /**
- * Where this project's flows are kept: its Flows folder (Tomás, 10 Oct 2026: a flow belongs to the project
- * it works on; to use one elsewhere, copy its folder). Not under .claude, where the session asks the person
- * before every write.
+ * Where the flows are kept, the same for every session: ~/.claude/flows (Tomás, 30 Oct 2026; before that
+ * each project kept its own in its Flows folder). Only the plugin writes there, so no agent meets the
+ * question the session asks before a write under .claude.
  */
-async function rootDir($: EngineInterface): Promise<string> {
+async function homeDir($: EngineInterface): Promise<string> {
+  const home = (await $.env.get('USERPROFILE').catch(() => undefined)) || (await $.env.get('HOME').catch(() => undefined))
+  const config = (await $.env.get('CLAUDE_CONFIG_DIR').catch(() => undefined)) || (home ? `${home}/.claude` : '')
+  return config ? `${config.replace(/\\/g, '/').replace(/\/+$/, '')}/flows` : ''
+}
+
+/** Where this session's runs go: its folder's Flows folder, <folder>/Flows/<name>/runs/<n>; empty with no folder. */
+async function outDir($: EngineInterface): Promise<string> {
   const project = await projectDir($)
   return project ? `${project}/Flows` : ''
 }
 
-const NO_FOLDER = 'This session has no folder, and a flow lives in the Flows folder of its project. Open a session in a project to use flows.'
+const NO_FOLDER = "This session has no folder, and a run's files go to the folder of the session that runs it. Open a session in a folder to run a flow."
+const NO_HOME = 'Flows could not find the Claude folder (~/.claude), where the flows are kept.'
+/** The flow's memory: what its steps marked `remember` handed on, run after run. Kept with the flow. */
+const memoryFile = (home: string, name: string): string => `${flowDir(home, name)}/memory.md`
 
 /** The newest run id in a flow's folder; 0 with none. */
 async function latestId($: EngineInterface, root: string, name: string): Promise<number> {
@@ -81,20 +92,21 @@ async function latestId($: EngineInterface, root: string, name: string): Promise
 
 /** Reads the flows and each one's newest run from disk into the pane's state. */
 async function loadFlows($: EngineInterface): Promise<void> {
-  const root = await rootDir($)
+  const home = await homeDir($)
+  const out = await outDir($)
   const mine = await read($, me)
   const t = await $.clock.now()
-  const dirs = (root ? await $.fs.list(root).catch(() => []) : []).filter(d => d.kind === 'dir' && NAME.test(d.name)).map(d => d.name).sort()
+  const dirs = (home ? await $.fs.list(home).catch(() => []) : []).filter(d => d.kind === 'dir' && NAME.test(d.name)).map(d => d.name).sort()
   const list: Flow[] = []
   const fromDisk: Record<string, Run> = {}
   for (const name of dirs) {
-    const text = await $.fs.read(`${flowDir(root, name)}/flow.json`).catch(() => null)
+    const text = await $.fs.read(`${flowDir(home, name)}/flow.json`).catch(() => null)
     if (text === null) continue
     list.push(parseFlow(name, text))
-    const id = await latestId($, root, name)
+    const id = out ? await latestId($, out, name) : 0
     if (!id) continue
     try {
-      const run = JSON.parse(await $.fs.read(`${runDir(root, name, id)}/run.json`)) as Run
+      const run = JSON.parse(await $.fs.read(`${runDir(out, name, id)}/run.json`)) as Run
       // A run nobody keeps alive lost its agents with its session.
       fromDisk[name] = active(run) && run.owner !== mine && t - run.beat > STALE ? settle(halt(run, 'interrupted', 'Interrupted: the session running it closed', t), t) : run
     } catch {
@@ -119,7 +131,7 @@ async function loadFlows($: EngineInterface): Promise<void> {
 /** Writes a run's current state to its run.json. */
 async function saveRun($: EngineInterface, name: string): Promise<void> {
   const run = (await read($, runs))[name]
-  if (run) await $.fs.write(`${runDir(await rootDir($), name, run.id)}/run.json`, JSON.stringify(run, null, 1)).catch(() => undefined)
+  if (run) await $.fs.write(`${runDir(await outDir($), name, run.id)}/run.json`, JSON.stringify(run, null, 1)).catch(() => undefined)
 }
 
 /** Applies one change to a flow's run, settles its status, and saves it. Null when `fn` had nothing to change. */
@@ -145,9 +157,12 @@ async function weekUsed($: EngineInterface): Promise<number | null> {
 // ——— A run's steps ———
 
 const typeOf = (flow: string, spec: FlowStep): string => `${flow}-${spec.id}`.slice(0, 64)
-/** What the session's Claude passes as an agent's description, so the agent is matched to its step. */
-const launchName = (run: Run, track: number, step: number): string => `${run.flow} #${run.id} [${track}.${step}] ${run.steps[step]?.name ?? ''}`
-const LAUNCH = /^(.+) #(\d+) \[(\d+)\.(\d+)\]/
+/** What the session's Claude passes as an agent's description, so the agent is matched to its step: the item and the step, in words. */
+const launchName = (run: Run, track: number, step: number): string => {
+  const item = run.tracks[track]?.item
+  // No double quotes in it: the session's Claude copies it into a quoted value.
+  return `${run.flow} #${run.id} · ${item !== undefined ? `${labelOf(item).slice(0, 40).replace(/"/g, "'")} (${track}/${run.tracks.length - 1}) · ` : ''}step ${step + 1}: ${(run.steps[step]?.name ?? '').replace(/"/g, "'")}`
+}
 
 /** The agent steps that are claimed and have no agent yet, as `[track, step]`. */
 const toLaunch = (run: Run): [number, number][] => run.tracks.flatMap((t, i): [number, number][] => (t.status === 'running' && run.steps[t.at]?.type === 'agent' && t.steps[t.at]?.status === 'running' && !t.steps[t.at]?.agentId ? [[i, t.at]] : []))
@@ -186,54 +201,145 @@ async function registerTypes($: EngineInterface, flow: Flow): Promise<void> {
   }
 }
 
-/** What a step's agent is asked: its instruction, its input, its folders, and the note it was sent back with. */
+/** The files of what the steps before `step` handed on in a track (the main track's, before an item's own), by step. */
+function earlier(dir: string, run: Run, track: number, step: number): { id: string; name: string; file: string }[] {
+  const t = run.tracks[track]
+  const main = run.tracks[0]
+  const out: { id: string; name: string; file: string }[] = []
+  for (let i = 0; i < step; i++) {
+    const spec = run.steps[i]
+    const at = t?.steps[i]?.status === 'done' ? track : track > 0 && main?.steps[i]?.status === 'done' ? 0 : -1
+    if (spec && at >= 0 && spec.type !== 'each') out.push({ id: spec.id, name: spec.name, file: outFile(dir, at, i) })
+  }
+  return out
+}
+
+/** The flow's memory as text, its last 50,000 characters; empty when it has none. */
+async function memoryOf($: EngineInterface, name: string): Promise<string> {
+  const home = await homeDir($)
+  return home ? (await $.fs.read(memoryFile(home, name)).catch(() => '')).slice(-50_000) : ''
+}
+
+/** What a step's agent is asked: its instruction, its input, what the run knows, its folders, and the note it was sent back with. */
 async function agentPrompt($: EngineInterface, run: Run, track: number, step: number, dir: string, token: number): Promise<string> {
   const spec = run.steps[step]
-  const input = await $.fs.read(inFile(dir, run, track, step)).catch(() => '')
+  const from = inFile(dir, run, track, step)
+  const input = await $.fs.read(from).catch(() => '')
   const note = run.tracks[track]?.steps[step]?.note
   const before = note === undefined ? '' : await $.fs.read(outFile(dir, track, step)).catch(() => '')
+  const item = run.tracks[track]?.item
+  const results = earlier(dir, run, track, step).filter(r => r.file !== from)
+  const memory = await memoryOf($, run.flow)
   return [
     `Task:\n${spec?.instruction ?? ''}`,
-    ...(run.tracks[track]?.item !== undefined ? [`This run handles one item of a list (item ${track} of ${run.tracks.length - 1}).`] : []),
+    ...(item !== undefined ? [`This run handles one item of a list (item ${track} of ${run.tracks.length - 1}: ${labelOf(item)}).`] : []),
     `Folders you may write in: ${dir} (this run's folder)${run.cwd ? ` and ${run.cwd} (the project the flow works on)` : ''}.`,
     `Result file (write your result here, and only your result): ${resultFile(dir, track, step, token)}`,
+    ...(spec?.schema ? [`Your result must be JSON of this shape (JSON Schema), and nothing else:\n${JSON.stringify(spec.schema)}`] : []),
     `Input:\n${input || '(none)'}`,
-    ...(note !== undefined ? [`You did this before and the reviewer sent it back with this note:\n${note}\n\nYour previous result:\n${before}`] : []),
+    ...(from !== `${dir}/out/input.txt` && run.input ? [`The run's own input, as the user gave it (${dir}/out/input.txt):\n${run.input.slice(0, 4000)}`] : []),
+    ...(run.vars ? [`The flow's inputs for this run: ${JSON.stringify(run.vars)}`] : []),
+    ...(results.length ? [`What the steps before handed on, if you need it (read the files):\n${results.map(r => `- ${r.id} (${r.name}): ${r.file}`).join('\n')}`] : []),
+    ...(memory ? [`The flow's memory, from its earlier runs (read it before you start): ${memoryFile(await homeDir($), run.flow)}`] : []),
+    ...(note !== undefined ? [`You did this before and it was sent back with this note:\n${note}\n\nYour previous result:\n${before}`] : []),
   ].join('\n\n')
 }
 
-/** Writes a step's result into its run. False when the step is no longer the one that was started at `token`. */
+/** What does not fit a step's schema in its result; empty when it fits or the step has none. */
+function wrongIn(spec: FlowStep | undefined, output: string): string[] {
+  if (!spec?.schema) return []
+  const value = jsonOf(output)
+  return value === undefined ? ['the result is not JSON'] : misfits(value, spec.schema)
+}
+
+/**
+ * Writes a step's result into its run, and into the flow's memory when the step says to remember it.
+ * False when the step is no longer the one that was started at `token`.
+ */
 async function finishStep($: EngineInterface, name: string, track: number, step: number, token: number, o: Outcome): Promise<boolean> {
   const run = (await read($, runs))[name]
   if (!run) return false
-  if (o.output !== undefined) await $.fs.write(outFile(runDir(await rootDir($), name, run.id), track, step), o.output)
+  if (o.output !== undefined) await $.fs.write(outFile(runDir(await outDir($), name, run.id), track, step), o.output)
   const t = await $.clock.now()
-  return (await mutate($, name, r => finish(r, track, step, token, o, t))) !== null
+  const done = (await mutate($, name, r => finish(r, track, step, token, o, t))) !== null
+  const spec = run.steps[step]
+  const home = await homeDir($)
+  if (done && spec?.remember && o.output !== undefined && o.error === undefined && !run.dry && home) {
+    const item = run.tracks[track]?.item
+    const was = await $.fs.read(memoryFile(home, name)).catch(() => '')
+    await $.fs.write(memoryFile(home, name), `${was}${was ? '\n' : ''}## Run ${run.id}${item !== undefined ? ` · ${labelOf(item)}` : ''} · ${spec.name} · ${new Date(t).toISOString().slice(0, 10)}\n${o.output.trim()}\n`).catch(() => undefined)
+  }
+  return done
 }
 
-/** Does a claimed step that needs no agent: a script, a split, or an approval's preview. */
+/** Something the person should know about a run, kept on it and shown in the pane and the chat. */
+async function warn($: EngineInterface, name: string, text: string): Promise<void> {
+  await mutate($, name, r => ({ ...r, warnings: [...(r.warnings ?? []), text] }))
+}
+
+/** A run past its flow's ceiling of tokens stops there, its agents with it. */
+async function overCeiling($: EngineInterface, name: string): Promise<void> {
+  const run = (await read($, runs))[name]
+  if (!run?.maxTokens || !active(run) || tokensOf(run) <= run.maxTokens) return
+  await warn($, name, `It used ${tokensOf(run)} tokens, over the flow's ceiling of ${run.maxTokens}, and was stopped.`)
+  await stopRun($, name)
+}
+
+/** How much the flow's last finished run took, from the session's folder; empty when it has none. */
+async function estimate($: EngineInterface, name: string): Promise<string> {
+  const out = await outDir($)
+  if (!out) return ''
+  for (let id = await latestId($, out, name); id > 0; id--) {
+    const run = await $.fs.read(`${runDir(out, name, id)}/run.json`).then(t => JSON.parse(t) as Run).catch(() => null)
+    if (run?.status !== 'done' || run.dry || run.endedAt === undefined) continue
+    return `Its last finished run (run ${run.id}) took ${count(tokensOf(run))} tokens and ${clock(run.endedAt - run.startedAt)}${run.weekStart != null && run.weekEnd != null ? `, about ${Math.max(0, run.weekEnd - run.weekStart).toFixed(1)}% of the weekly limit` : ''}.`
+  }
+  return ''
+}
+
+/** What an approval shows: its `show` filled in from the JSON it receives, else that JSON laid out, else the text. */
+function approvalText(spec: FlowStep, input: string): string {
+  const value = jsonOf(input)
+  const text = spec.show ? fill(spec.show, value) : value !== undefined && typeof value === 'object' ? JSON.stringify(value, null, 2) : input
+  if (text.length <= 8000) return text
+  // Cut at a line, never in the middle of one, and say how much is left out.
+  const at = text.lastIndexOf('\n', 8000)
+  const kept = text.slice(0, at > 4000 ? at : 8000)
+  return `${kept}\n… (${text.length - kept.length} more characters in the file)`
+}
+
+/** Does a claimed step that needs no agent: a script, a split, or an approval's preview (in a test run, its pass). */
 async function work($: EngineInterface, name: string, run: Run, track: number, step: number, token: number): Promise<void> {
   const spec = run.steps[step]
   if (!spec) return
-  const root = await rootDir($)
-  const dir = runDir(root, name, run.id)
+  const dir = runDir(await outDir($), name, run.id)
   const input = await $.fs.read(inFile(dir, run, track, step)).catch(() => '')
   if (spec.type === 'approval') {
-    await mutate($, name, r => noteStep(r, track, step, token, { preview: input.slice(0, 2000) }))
+    if (run.dry) return void (await finishStep($, name, track, step, token, { output: input }))
+    await mutate($, name, r => noteStep(r, track, step, token, { preview: approvalText(spec, input) }))
     return
   }
   if (spec.type === 'each') {
-    const items = itemsOf(input)
+    let items = itemsOf(input)
     if (items.length === 0) return void (await finishStep($, name, track, step, token, { output: input, end: 'There were no items' }))
+    if (spec.max !== undefined && spec.max > 0 && items.length > spec.max) {
+      await warn($, name, `"${spec.name}" was handed ${items.length} items and takes at most ${spec.max}: it kept the first ${spec.max}.`)
+      items = items.slice(0, spec.max)
+    }
     for (const [k, item] of items.entries()) await $.fs.write(`${dir}/out/${k + 1}-item.txt`, item)
     await mutate($, name, r => split(r, step, token, items.map(labelOf), token))
     return
   }
   const seconds = Math.max(1, Math.min(600, spec.seconds ?? 60))
-  const stdin = JSON.stringify({ input, flow: name, run: run.id, track, runDir: dir, cwd: run.cwd ?? dir })
-  const r = await $.process.run(['node', `${flowDir(root, name)}/${spec.file ?? ''}`], { cwd: dir, stdin, timeoutMs: seconds * 1000 })
+  const outputs: Record<string, string> = {}
+  for (const r of earlier(dir, run, track, step)) outputs[r.id] = await $.fs.read(r.file).catch(() => '')
+  const item = run.tracks[track]?.item !== undefined ? await $.fs.read(`${dir}/out/${track}-item.txt`).catch(() => '') : undefined
+  const stdin = JSON.stringify({ input, runInput: run.input, vars: run.vars ?? {}, outputs, memory: await memoryOf($, name), ...(item !== undefined ? { item } : {}), flow: name, run: run.id, track, runDir: dir, cwd: run.cwd ?? dir, dry: Boolean(run.dry) })
+  const r = await $.process.run(['node', `${flowDir(await homeDir($), name)}/${spec.file ?? ''}`], { cwd: dir, stdin, timeoutMs: seconds * 1000 })
+  const wrong = r.exitCode === 0 ? wrongIn(spec, r.stdout) : []
   // Exit 0 hands the output on; exit 3 ends the flow there, its output the reason.
-  if (r.exitCode === 0) await finishStep($, name, track, step, token, { output: r.stdout.trimEnd() })
+  if (wrong.length) await finishStep($, name, track, step, token, { error: `Its output does not fit the step's schema: ${wrong.join('; ')}` })
+  else if (r.exitCode === 0) await finishStep($, name, track, step, token, { output: r.stdout.trimEnd() })
   else if (r.exitCode === 3) await finishStep($, name, track, step, token, { output: r.stdout.trimEnd(), end: r.stdout.trim().slice(0, 200) || 'Ended by the code step' })
   else await finishStep($, name, track, step, token, { error: (r.stderr.trim() || r.stdout.trim() || `The script exited with code ${r.exitCode}`).slice(-1500) })
 }
@@ -251,7 +357,16 @@ async function advance($: EngineInterface, name: string): Promise<void> {
       const t = await $.clock.now()
       const claimed = await mutate($, name, r => claim(r, track, step, t))
       const type = claimed?.steps[step]?.type
-      if (!claimed || type === 'agent') continue
+      if (!claimed) continue
+      if (type === 'agent') {
+        // A test run starts no agent: the step hands on a made-up result of its shape.
+        if (!claimed.dry) continue
+        const spec = claimed.steps[step]
+        const made = sample(spec?.schema, spec?.name ?? 'result')
+        await finishStep($, name, track, step, t, { output: typeof made === 'string' ? made : JSON.stringify(made, null, 2) })
+        moved = true
+        continue
+      }
       await work($, name, claimed, track, step, t).catch((err: unknown) => finishStep($, name, track, step, t, { error: String(err) }))
       if (type !== 'approval') moved = true
     }
@@ -278,18 +393,40 @@ async function agentDone($: EngineInterface, agentId: string, answer: string, re
   for (const [name, run] of Object.entries(await read($, runs))) {
     const at = agentStep(run, agentId)
     if (!at) continue
-    const token = run.tracks[at[0]]?.steps[at[1]]?.startedAt ?? 0
+    const [track, step] = at
+    const s = run.tracks[track]?.steps[step]
+    const spec = run.steps[step]
+    const token = s?.startedAt ?? 0
     const failed = /^\s*FLOW-ERROR:/i.test(answer)
+    const dir = runDir(await outDir($), name, run.id)
     // The result is the file the agent was told to write; one that wrote none is taken at its word.
-    const written = reason === 'answer' && !failed ? await $.fs.read(resultFile(runDir(await rootDir($), name, run.id), at[0], at[1], token)).catch(() => '') : ''
-    const o: Outcome = reason !== 'answer' ? { error: `The agent stopped (${reason})${answer.trim() ? `: ${answer.trim().slice(0, 1200)}` : ''}`, tokens } : failed ? { error: answer.replace(/^\s*FLOW-ERROR:\s*/i, '').slice(0, 1500), tokens } : written.trim() ? { output: written.trimEnd(), tokens } : /^\s*DONE\.?\s*$/i.test(answer) ? { error: 'The agent said it was done but wrote no result file.', tokens } : { output: answer, tokens }
-    if (await finishStep($, name, at[0], at[1], token, o)) await advance($, name)
+    const written = reason === 'answer' && !failed ? await $.fs.read(resultFile(dir, track, step, token)).catch(() => '') : ''
+    let o: Outcome = reason !== 'answer' ? { error: `The agent stopped (${reason})${answer.trim() ? `: ${answer.trim().slice(0, 1200)}` : ''}`, tokens } : failed ? { error: answer.replace(/^\s*FLOW-ERROR:\s*/i, '').slice(0, 1500), tokens } : written.trim() ? { output: written.trimEnd(), tokens } : /^\s*DONE\.?\s*$/i.test(answer) ? { error: 'The agent said it was done but wrote no result file.', tokens } : { output: answer, tokens }
+    const used = (s?.tokens ?? 0) + tokens
+    if (o.output !== undefined && spec?.maxTokens && used > spec.maxTokens) o = { error: `It used ${used} tokens, over the step's ceiling of ${spec.maxTokens}.`, tokens }
+    const wrong = o.output !== undefined ? wrongIn(spec, o.output) : []
+    if (o.output !== undefined && wrong.length) {
+      // A result of the wrong shape goes back to the agent with what is wrong in it, a few times, before the step fails.
+      if ((s?.tries ?? 0) < (spec?.retries ?? 2)) {
+        await $.fs.write(outFile(dir, track, step), o.output)
+        const note = `Your result does not have the shape it must have:\n${wrong.map(w => `- ${w}`).join('\n')}\nWrite it again, as JSON of this shape and nothing else: ${JSON.stringify(spec?.schema)}`
+        if (await mutate($, name, r => askAgain(r, track, step, token, note, tokens))) await advance($, name)
+        return
+      }
+      o = { error: `Its result did not fit the step's schema after ${(s?.tries ?? 0) + 1} tries: ${wrong.join('; ')}`, tokens }
+    }
+    if (await finishStep($, name, track, step, token, o)) {
+      await overCeiling($, name)
+      await advance($, name)
+    }
     return
   }
 }
 
-/** The person's answer to an approval: on with it, end there, or back to the agent before with a note. */
-async function decide($: EngineInterface, name: string, track: number, step: number, answer: 'approve' | 'reject' | 'back', note: string): Promise<void> {
+type Answer = 'approve' | 'reject' | 'back' | 'edit'
+
+/** The person's answer to an approval: on with it (as it is, or as they changed it), end there, or back to the agent before with a note. */
+async function decide($: EngineInterface, name: string, track: number, step: number, answer: Answer, note: string): Promise<void> {
   const run = (await read($, runs))[name]
   const s = run?.tracks[track]?.steps[step]
   if (!run || s?.status !== 'waiting') return
@@ -297,8 +434,9 @@ async function decide($: EngineInterface, name: string, track: number, step: num
     await mutate($, name, r => sendBack(r, track, step, note.trim() || 'Please do it again.'))
     return
   }
-  const input = await $.fs.read(inFile(runDir(await rootDir($), name, run.id), run, track, step)).catch(() => '')
-  await finishStep($, name, track, step, s.startedAt ?? 0, answer === 'reject' ? { output: input, end: `Rejected at "${run.steps[step]?.name ?? 'approval'}"` } : { output: input })
+  const input = await $.fs.read(inFile(runDir(await outDir($), name, run.id), run, track, step)).catch(() => '')
+  const output = answer === 'edit' && note.trim() ? note : input
+  await finishStep($, name, track, step, s.startedAt ?? 0, answer === 'reject' ? { output: input, end: `Rejected at "${run.steps[step]?.name ?? 'approval'}"` } : { output })
 }
 
 // ——— What the session's Claude is told ———
@@ -327,19 +465,26 @@ async function directive($: EngineInterface, name: string): Promise<string> {
     const spec = run.steps[s]
     const back = agentBefore(run, t, s) >= 0
     const item = run.tracks[t]?.item
+    const items = run.tracks.length - 1
+    const dir = runDir(await outDir($), name, run.id)
+    // The approvals of the same step, one per item: they can all be answered at once.
+    const alike = asks.filter(([, i]) => i === s).length
     return [
-      `${head} It waits for the user's approval at step ${s + 1}, "${spec?.name ?? ''}"${item !== undefined ? ` (item: ${item})` : ''}.`,
-      `First show the user what they are approving, word for word, in a message:`,
+      `${head} It waits for the user's approval at step ${s + 1}, "${spec?.name ?? ''}"${item !== undefined ? `, for item ${t} of ${items} (${labelOf(item)})` : ''}${asks.length > 1 ? `; approval 1 of the ${asks.length} waiting` : ''}.`,
+      `First show the user what they are approving, word for word, in a message, with where it is:`,
       `<to-approve>\n${run.tracks[t]?.steps[s]?.preview || '(nothing)'}\n</to-approve>`,
-      `Then ask them what to do: with the AskUserQuestion tool if you have it (options "Approve", "Reject"${back ? ', "Send back" (to the agent, with a note)' : ''}), otherwise with a plain question, ending your turn until they answer.`,
-      `${working(run) > 0 ? `${working(run)} agents of this flow are still working in the background; that must not delay this question. ` : ''}${asks.length > 1 ? `${asks.length - 1} more approvals wait behind this one: you will be handed each in turn. ` : ''}Then call ${TOOL} with {"flow":"${name}","approval":"${t}.${s}","answer":"approve"}, "reject"${back ? `, or "back" with "note" set to what the user wants changed` : ''}. Never answer for the user.`,
+      `The whole of it: ${inFile(dir, run, t, s)}. The run's files: ${dir}. If it names files or pages the user would want to see, give them as links they can open.`,
+      `Then ask them what to do: with the AskUserQuestion tool if you have it (options "Approve", "Approve with changes", "Reject"${back ? ', "Send back" (to the agent, with a note)' : ''}${alike > 1 ? `, "Approve all ${alike}" (every item waiting at this step)` : ''}), otherwise with a plain question, ending your turn until they answer.`,
+      `${working(run) > 0 ? `${working(run)} agents of this flow are still working in the background; that must not delay this question. ` : ''}${asks.length > 1 ? `${asks.length - 1} more approvals wait behind this one: you will be handed each in turn. ` : ''}Then call ${TOOL} with {"flow":"${name}","approval":"${t}.${s}","answer":"approve"}; "edit" with "note" set to the whole text to hand on in its place, as the user changed it; "reject"${back ? `; "back" with "note" set to what the user wants changed` : ''}${alike > 1 ? `; or "approve_all"` : ''}. Never answer for the user.`,
     ].join('\n')
   }
   if (working(run) > 0) return `${head} ${working(run)} of its agents are working in the background and nothing waits for the user. Do not start them again and do not poll: say in one short line that the flow is running, then end your turn. You are woken when an agent finishes; then ${again(name)}.`
+  const warned = run.warnings?.length ? [`Tell the user too: ${run.warnings.join(' ')}`] : []
   if (run.status === 'done') {
     const last = run.tracks.flatMap(t => (t.status === 'done' && t.at === run.steps.length - 1 ? [t.steps[t.at]?.preview ?? ''] : [])).filter(Boolean)
     return [
-      `${head} It finished${run.ended ? `: ${run.ended}` : ''}. Its files are in ${runDir(await rootDir($), name, run.id)}.`,
+      `${head} It finished${run.ended ? `: ${run.ended}` : ''}${run.dry ? ' (a test run: no agent ran and the approvals passed by themselves; what it handed on is made up)' : ''}. Its files are in ${runDir(await outDir($), name, run.id)}.`,
+      ...warned,
       `Tell the user it is done in a line or two, with the result${last.length > 1 ? 's' : ''} of its last step:`,
       ...last.slice(0, 8).map(text => `- ${text.slice(0, Math.max(600, Math.floor(4000 / last.length)))}`),
     ].join('\n')
@@ -352,9 +497,11 @@ async function directive($: EngineInterface, name: string): Promise<string> {
       `Tell the user what failed, in plain words, and propose one fix to the flow: say exactly what you would change, and show the changed lines if it is a script. Ask them once whether to make it. Change nothing until they agree.`,
       `If they agree, call ${DRAFT} with {"flow":"${name}","action":"start"} to see the flow as it is, then with "action":"propose", the whole flow with the fix, and "agreed":true: that saves it at once, since they already said yes. Do not ask them again. Then call ${TOOL} with {"flow":"${name}","retry":true}, which takes this run up again at the failed step.`,
       `If the fix adds, removes or reorders steps, this run cannot go on with it: offer to start a new one (${MANAGE} with {"action":"run","flow":"${name}"}).`,
+      ...(failed.length > 1 ? [`Several items failed: one can be taken up alone, with ${MANAGE} {"action":"retry","flow":"${name}","item":<its number>}.`] : []),
+      ...warned,
     ].join('\n')
   }
-  return `${head} It was ${run.status}. Do nothing more for it; tell the user it can be taken up again where it stopped, if they ask.`
+  return [`${head} It was ${run.status}. Do nothing more for it; tell the user it can be taken up again where it stopped, if they ask.`, ...warned].join('\n')
 }
 
 /** The first prompt of a run (or of its retry): the session's Claude takes it from there with the tool. */
@@ -378,27 +525,64 @@ async function prune($: EngineInterface, root: string, name: string, newest: num
 }
 
 /**
- * Starts a new run of a flow. From a command or a button the chat is handed the first prompt (`kickIt`);
- * from the session's Claude, already in its turn, it is not: the tool's answer goes on from there.
+ * How a run starts: the values of the flow's inputs (or a JSON text of them), the step to start at (its id
+ * or number), a test run, and whether a run of the flow still going is stopped to make way.
  */
-async function startRun($: EngineInterface, name: string, input: string, kickIt = true): Promise<string> {
+export type StartOptions = { inputs?: Record<string, unknown>; from?: string | number; dry?: boolean; replace?: boolean }
+
+/**
+ * Starts a new run of a flow. From a command the chat is handed the first prompt (`kickIt`); from the
+ * session's Claude, already in its turn, it is not: the tool's answer goes on from there.
+ */
+async function startRun($: EngineInterface, name: string, input: string, kickIt = true, o: StartOptions = {}): Promise<string> {
   const flow = (await read($, flows)).find(f => f.name === name)
   if (!flow) return `There is no flow named "${name}".`
   if (flow.error) return `"${name}" cannot run: ${flow.error}.`
-  if (active((await read($, runs))[name])) return `"${name}" is already running.`
-  const root = await rootDir($)
-  const id = (await latestId($, root, name)) + 1
+  const out = await outDir($)
+  if (!out) return NO_FOLDER
+  const was = (await read($, runs))[name]
+  if (active(was) && !o.replace) return `"${name}" is already running (run ${was?.id ?? 0}).`
+  if (active(was) && was?.owner !== (await read($, me))) return `"${name}" is running in another session; stop it there first.`
+  let from = 0
+  if (o.from !== undefined && o.from !== '') {
+    from = typeof o.from === 'number' ? o.from - 1 : /^\d+$/.test(o.from) ? Number(o.from) - 1 : flow.steps.findIndex(s => s.id === o.from)
+    if (!flow.steps[from]) return `"${name}" has no step ${JSON.stringify(o.from)}. Its steps: ${flow.steps.map((s, i) => `${i + 1}. ${s.id}`).join(', ')}.`
+  }
+  // Started after the "each", the input is the list of items, each one's track starting at that step.
+  const each = flow.steps.findIndex(s => s.type === 'each')
+  const items = each >= 0 && from > each ? itemsOf(input) : null
+  if (items?.length === 0) return `"${name}" started at step ${from + 1} needs the list of items as its input, a JSON list or one item per line.`
+  // The flow's inputs, each of its type: from the values given, a JSON text of them, or the text as the first one.
+  let vars: Record<string, unknown> | undefined
+  if (flow.inputs?.length) {
+    const json = items ? undefined : jsonOf(input)
+    const first = flow.inputs[0]?.id ?? ''
+    const given = o.inputs ?? (json && typeof json === 'object' && !Array.isArray(json) ? (json as Record<string, unknown>) : input && !items ? { [first]: input } : {})
+    const got = varsOf(flow.inputs, given)
+    if ('error' in got) return `"${name}" cannot start: ${got.error}. Its inputs: ${flow.inputs.map(d => `${d.id} (${d.type ?? 'string'}${d.required ? ', needed' : ''}${d.description ? `: ${d.description}` : ''})`).join('; ')}.`
+    vars = got.vars
+    if (!items) input = JSON.stringify(vars, null, 2)
+  }
+  // Only now, with everything in order, does the run still going make way.
+  if (active(was)) await stopRun($, name)
+  const id = (await latestId($, out, name)) + 1
   const t = await $.clock.now()
+  const dir = runDir(out, name, id)
   await registerTypes($, flow)
-  await $.fs.write(`${runDir(root, name, id)}/out/input.txt`, input)
-  void prune($, root, name, id).catch(() => undefined)
-  const run = newRun({ ...flow, cwd: flow.cwd ?? (await projectDir($)) }, id, input, t, await read($, me), await weekUsed($))
-  await update($, runs, all => ({ ...all, [name]: run }))
+  await $.fs.write(`${dir}/out/input.txt`, input)
+  void prune($, out, name, id).catch(() => undefined)
+  let run = newRun({ ...flow, cwd: flow.cwd ?? (await projectDir($)) }, id, input, t, await read($, me), await weekUsed($), { from: items ? each : from, ...(vars ? { vars } : {}), ...(o.dry ? { dry: true } : {}) })
+  if (items) {
+    for (const [k, item] of items.entries()) await $.fs.write(`${dir}/out/${k + 1}-item.txt`, item)
+    run = settle(promote(fromItems(run, from, items.map(labelOf))), t)
+  }
+  const started = run
+  await update($, runs, all => ({ ...all, [name]: started }))
   await update($, view, () => ({ flow: name }))
   await saveRun($, name)
   await advance($, name)
   if (kickIt) kick($, kickoff(name, id, false))
-  return `Started "${name}" (run ${id}).`
+  return `Started "${name}" (run ${id}${o.dry ? ', a test run' : ''}${from > 0 ? `, at step ${from + 1}` : ''}).`
 }
 
 async function stopAgent($: EngineInterface, agentId: string): Promise<void> {
@@ -409,26 +593,32 @@ async function stopAgent($: EngineInterface, agentId: string): Promise<void> {
  * Takes a run that stopped up again, at its failed steps. If the flow changed since and still has the same
  * steps, the run goes on with the flow as it is now. Answers why not, or null when it did.
  */
-async function takeUp($: EngineInterface, name: string): Promise<string | null> {
+async function takeUp($: EngineInterface, name: string, item?: number | string): Promise<string | null> {
   const flow = (await read($, flows)).find(f => f.name === name)
   const was = (await read($, runs))[name]
   if (!flow || !was) return `"${name}" has no run to take up. /flows run ${name} starts one.`
   if (was.status === 'done') return `"${name}" finished its last run. /flows run ${name} starts a new one.`
+  // One item alone: by its number, or its label.
+  const only = item === undefined || item === '' ? undefined : typeof item === 'number' || /^\d+$/.test(item) ? Number(item) : was.tracks.findIndex(tr => tr.item !== undefined && tr.item.toLowerCase().includes(item.toLowerCase()))
+  if (only !== undefined && (only < 1 || was.tracks[only]?.status !== 'failed')) {
+    const failed = was.tracks.flatMap((tr, i) => (i > 0 && tr.status === 'failed' ? [`${i} (${tr.item ?? ''})`] : []))
+    return `Run ${was.id} of "${name}" has no failed item ${JSON.stringify(item)}.${failed.length ? ` Its failed items: ${failed.join(', ')}.` : ''}`
+  }
   const steps = !flow.error && sameShape(was.steps, flow.steps) ? flow.steps : was.steps
   const t = await $.clock.now()
   const mine = await read($, me)
   await registerTypes($, { ...flow, steps })
   await mutate($, name, r => {
     const now: Run = { ...r, steps, owner: mine, beat: t }
-    return now.tracks.some(tr => tr.status === 'failed') ? retry(now, mine, t) : now
+    return now.tracks.some(tr => tr.status === 'failed') ? retry(now, mine, t, only) : now
   })
   await update($, view, () => ({ flow: name }))
   await advance($, name)
   return null
 }
 
-async function retryRun($: EngineInterface, name: string): Promise<string> {
-  const why = await takeUp($, name)
+async function retryRun($: EngineInterface, name: string, item?: string): Promise<string> {
+  const why = await takeUp($, name, item)
   if (why) return why
   const run = (await read($, runs))[name]
   kick($, kickoff(name, run?.id ?? 0, true))
@@ -454,8 +644,8 @@ async function showRun($: EngineInterface, name: string, id: number, asked = Str
     await update($, view, () => ({ flow: name }))
     return null
   }
-  const root = await rootDir($)
-  const text = Number.isInteger(id) && id > 0 ? await $.fs.read(`${runDir(root, name, id)}/run.json`).catch(() => null) : null
+  const root = await outDir($)
+  const text = root && Number.isInteger(id) && id > 0 ? await $.fs.read(`${runDir(root, name, id)}/run.json`).catch(() => null) : null
   if (text === null) {
     const ids = (await $.fs.list(`${flowDir(root, name)}/runs`).catch(() => [])).filter(d => d.kind === 'dir' && /^\d+$/.test(d.name)).map(d => Number(d.name)).sort((x, y) => x - y)
     return ids.length ? `"${name}" has no run ${asked}. Its runs: ${ids.join(', ')}.` : `"${name}" has not run yet.`
@@ -491,9 +681,10 @@ async function save($: EngineInterface, dir: string, flow: Flow, files: Record<s
 /** The draft tool: how to write the flow, the check of a proposal, and the save the person agreed to. */
 async function authoring($: EngineInterface, input: Proposal & { flow?: unknown; action?: unknown; agreed?: unknown }): Promise<string> {
   const name = typeof input.flow === 'string' ? input.flow.trim() : ''
-  if (!(await rootDir($))) return `${NO_FOLDER} Tell the user so.`
+  const home = await homeDir($)
+  if (!home) return `${NO_HOME} Tell the user so.`
   if (!NAME.test(name) || VERBS.includes(name)) return `"${name}" is not a flow name: lower-case letters, digits and hyphens, and none of ${VERBS.join(', ')}. Ask the user for one.`
-  const dir = flowDir(await rootDir($), name)
+  const dir = flowDir(home, name)
   const json = await $.fs.read(`${dir}/flow.json`).catch(() => null)
   const mode: Draft['mode'] = json === null ? 'new' : 'edit'
   const have = await read($, draft)
@@ -503,16 +694,21 @@ async function authoring($: EngineInterface, input: Proposal & { flow?: unknown;
     return guide(DRAFT, name, mode, ask, json === null ? null : { json, files: await scripts($, dir, json) })
   }
   if (input.action === 'propose') {
-    const checked = check(name, input, Object.keys(await scripts($, dir, json)))
-    if ('error' in checked) return `Not accepted: ${checked.error} Fix it and propose the whole flow again.`
+    const saved = json === null ? null : parseFlow(name, json)
+    // A patch changes the latest draft of this flow, else the flow as it is saved.
+    const made = whole(input, have?.name === name && have.flow ? have.flow : saved)
+    if ('error' in made) return `Not accepted: ${made.error}`
+    const checked = check(name, made, Object.keys(await scripts($, dir, json)))
+    if ('error' in checked) return `Not accepted: ${checked.error} Fix it and propose again.`
+    const changed = changes(saved, checked.flow)
     if (input.agreed === true) {
       // The person said yes to this very change (a fix after a failed run): no draft, no second question.
       await save($, dir, checked.flow, checked.files)
-      return `Saved the change to "${name}". Tell the user in one line what changed.`
+      return [`Saved the change to "${name}".`, ...changed.map(c => `- ${c}`), 'Tell the user in one line what changed.'].join('\n')
     }
     await update($, draft, () => ({ name, mode, ask, flow: checked.flow, files: checked.files }))
     await $.ui.open({ id: PANE, title: 'Flows' }).catch(() => undefined)
-    return presented(DRAFT, checked.flow, checked.files)
+    return presented(DRAFT, checked.flow, checked.files, changed)
   }
   if (input.action === 'save') {
     if (have?.name !== name || !have.flow) return `There is no draft of "${name}" to save: propose it first.`
@@ -617,7 +813,7 @@ function meter(s: StepRun | undefined, t: number): string {
   return s.tokens ? `${time} · ${count(s.tokens)}` : time
 }
 
-function pane(ui: Ui, acts: Acts, list: Flow[], all: Record<string, Run>, v: View, t: number, isDesktop: boolean, cols: number, old: Run | null, drafted: Draft | null) {
+function pane(ui: Ui, acts: Acts, list: Flow[], all: Record<string, Run>, v: View, t: number, isDesktop: boolean, cols: number, old: Run | null, drafted: Draft | null, out: string) {
   const { Box, Text } = ui
   // A flow being written shows in place of the chosen one, until it is saved or dropped.
   const isDraft = Boolean(drafted?.flow)
@@ -625,7 +821,7 @@ function pane(ui: Ui, acts: Acts, list: Flow[], all: Record<string, Run>, v: Vie
     return (
       <Box flexDirection="column">
         <Text bold>No flows yet</Text>
-        <Text dimColor>This project has no flows yet. Describe one in the chat and Claude writes it with you, in its Flows folder.</Text>
+        <Text dimColor>Describe one in the chat and Claude writes it with you. It is kept in ~/.claude/flows, for every session; each run's files go to the session's folder.</Text>
       </Box>
     )
   }
@@ -642,6 +838,16 @@ function pane(ui: Ui, acts: Acts, list: Flow[], all: Record<string, Run>, v: Vie
   const each = steps.findIndex(s => s.type === 'each')
   const week = run && run.weekStart != null && run.weekEnd != null ? Math.max(0, run.weekEnd - run.weekStart) : null
   const top = controls(ui, acts, list, all, name, isDraft, t)
+  // Under the run: what the person should know about it, and where its files are.
+  const notes = run ? (
+    <Box key="notes" flexDirection="column">
+      {run.dry && <Text color="warning">Test run: no agent ran, the approvals passed by themselves, and what the agents handed on is made up.</Text>}
+      {(run.warnings ?? []).map((w, i) => (
+        <Text key={`warn:${i}`} color="warning">{`! ${w}`}</Text>
+      ))}
+      {out && <Text dimColor wrap="truncate-middle">{`Files: ${runDir(out, name, run.id)}`}</Text>}
+    </Box>
+  ) : null
 
   // The desktop app draws: a header, then one picture per step and per item.
   if (isDesktop && 'Svg' in ui) {
@@ -686,6 +892,7 @@ function pane(ui: Ui, acts: Acts, list: Flow[], all: Record<string, Run>, v: Vie
       <Box flexDirection="column">
         <Box marginBottom={1}>{top}</Box>
         <Svg key="head" source={head.source} alt={`${name}${run ? `: run ${run.id}, ${run.status}` : ''}`} width={w} height={head.height} />
+        {notes && <Box marginBottom={1}>{notes}</Box>}
         {pictures.map(p => (
           <Svg key={p.key} source={p.source} alt={p.alt} width={w} height={p.height} />
         ))}
@@ -725,6 +932,7 @@ function pane(ui: Ui, acts: Acts, list: Flow[], all: Record<string, Run>, v: Vie
             {`  ${clock(Math.max(0, (run.endedAt ?? Math.max(t, run.startedAt)) - run.startedAt))} · ${count(tokensOf(run))} tokens${week !== null ? ` · week ≈ ${week < 0.1 ? '<0.1' : week.toFixed(1)}%` : ''}`}
           </Text>
           {run.ended && <Text dimColor>{run.ended}</Text>}
+          {notes}
         </Box>
       ) : (
         <Text color={isDraft ? 'warning' : 'inactive'}>{isDraft ? DRAFTED : 'Not run yet.'}</Text>
@@ -760,14 +968,37 @@ async function togglePane($: EngineInterface): Promise<string> {
   return 'Opened the Flows pane.'
 }
 
-/** The project's flows, one line each: what it does, how long it is, and how its last run went. */
+/** The flows, one line each: what it does, how long it is, what it asks for, and how its last run here went. */
 async function flowLines($: EngineInterface): Promise<string[]> {
   const all = await read($, runs)
   return (await read($, flows)).map(f => {
     const run = all[f.name]
-    const last = f.error ? `cannot run: ${f.error}` : run ? `run ${run.id} ${run.status}` : 'not run yet'
-    return `${f.name}: ${f.description || '(no description)'} (${f.steps.length} step${f.steps.length === 1 ? '' : 's'} · ${last})`
+    const cost = run?.status === 'done' && run.endedAt !== undefined && !run.dry ? `, ${count(tokensOf(run))} tokens, ${clock(run.endedAt - run.startedAt)}` : ''
+    const last = f.error ? `cannot run: ${f.error}` : run ? `run ${run.id} ${run.status}${cost}` : 'not run here yet'
+    const asks = f.inputs?.length ? ` · inputs: ${f.inputs.map(d => `${d.id}${d.required ? '*' : ''}`).join(', ')}` : ''
+    return `${f.name}: ${f.description || '(no description)'} (${f.steps.length} step${f.steps.length === 1 ? '' : 's'}${asks} · ${last})`
   })
+}
+
+/** Flows in this session's folder from before the flows moved to ~/.claude/flows, not brought over yet. */
+async function leftBehind($: EngineInterface): Promise<string[]> {
+  const out = await outDir($)
+  if (!out) return []
+  const have = new Set((await read($, flows)).map(f => f.name))
+  const dirs = (await $.fs.list(out).catch(() => [])).filter(d => d.kind === 'dir' && NAME.test(d.name) && !have.has(d.name))
+  const found: string[] = []
+  for (const d of dirs) if (await $.fs.exists(`${out}/${d.name}/flow.json`).catch(() => false)) found.push(d.name)
+  return found
+}
+
+/** Copies a flow's flow.json and the scripts of its code steps from one folder to another. Answers why not, or null. */
+async function copyFlow($: EngineInterface, from: string, to: string): Promise<string | null> {
+  const json = await $.fs.read(`${from}/flow.json`).catch(() => null)
+  if (json === null) return `There is no flow.json in ${from}.`
+  if (await $.fs.exists(`${to}/flow.json`).catch(() => false)) return `There is a flow in ${to} already.`
+  for (const [path, text] of Object.entries(await scripts($, from, json))) await $.fs.write(`${to}/${path}`, text)
+  await $.fs.write(`${to}/flow.json`, json)
+  return null
 }
 
 /** What deleting a flow takes with it, in words, and its folder; or why it cannot be deleted now. */
@@ -775,9 +1006,8 @@ async function whatGoes($: EngineInterface, name: string): Promise<{ why: string
   const flow = (await read($, flows)).find(f => f.name === name)
   if (!flow) return { why: `There is no flow named "${name}".` }
   if (active((await read($, runs))[name])) return { why: `"${name}" is running. Stop it first, then delete it.` }
-  const dir = flowDir(await rootDir($), name)
-  const kept = (await $.fs.list(`${dir}/runs`).catch(() => [])).filter(d => d.kind === 'dir').length
-  return { what: `the flow "${name}" for good: its ${flow.steps.length} step${flow.steps.length === 1 ? '' : 's'}, its scripts and its ${kept} run${kept === 1 ? '' : 's'}, in ${dir}`, dir }
+  const dir = flowDir(await homeDir($), name)
+  return { what: `the flow "${name}" for good, for every session: its ${flow.steps.length} step${flow.steps.length === 1 ? '' : 's'}, its scripts and its memory, in ${dir}. Its runs' files stay in the folders where they ran`, dir }
 }
 
 /** Deletes a flow's folder; nothing brings it back. */
@@ -788,15 +1018,18 @@ async function removeFlow($: EngineInterface, name: string, dir: string): Promis
   return left || gone?.exitCode !== 0 ? `"${name}" could not be deleted. Its folder is ${dir}.` : `Deleted "${name}".`
 }
 
-const MANAGE_ACTIONS = ['open', 'close', 'list', 'show', 'run', 'retry', 'stop', 'delete'] as const
+const MANAGE_ACTIONS = ['open', 'close', 'list', 'show', 'run', 'retry', 'stop', 'delete', 'copy', 'rename', 'import'] as const
+
+type ManageInput = { action?: unknown; flow?: unknown; input?: unknown; inputs?: unknown; from?: unknown; dry?: unknown; replace?: unknown; item?: unknown; run?: unknown; to?: unknown; path?: unknown; confirmed?: unknown }
 
 /**
  * What /flows does, for the session's Claude when the person asks in their own words ("open the flows",
  * "start the Spain visits flow"). Answers what happened and what to tell the person, or what to do next.
  */
-async function manage($: EngineInterface, input: { action?: unknown; flow?: unknown; input?: unknown; run?: unknown; confirmed?: unknown }): Promise<string> {
+async function manage($: EngineInterface, input: ManageInput): Promise<string> {
   const action = typeof input.action === 'string' ? input.action : ''
   const name = typeof input.flow === 'string' ? input.flow.trim() : ''
+  const to = typeof input.to === 'string' ? input.to.trim() : ''
   if (action === 'close') {
     await $.ui.close({ id: PANE }).catch(() => undefined)
     return 'Closed the Flows pane. Tell the user in a few words.'
@@ -806,12 +1039,27 @@ async function manage($: EngineInterface, input: { action?: unknown; flow?: unkn
     await $.ui.open({ id: PANE, title: 'Flows' }).catch(() => undefined)
     return 'Opened the Flows pane. Tell the user in a few words.'
   }
-  if (!(await rootDir($))) return `${NO_FOLDER} Tell the user so.`
+  const home = await homeDir($)
+  if (!home) return `${NO_HOME} Tell the user so.`
   await loadFlows($)
   const lines = await flowLines($)
-  const listed = lines.length ? [`The flows of this project (${await rootDir($)}):`, ...lines.map(l => `- ${l}`)] : ['This project has no flows yet.']
+  const behind = await leftBehind($)
+  const listed = [
+    ...(lines.length ? [`The flows (kept in ${home}, for every session):`, ...lines.map(l => `- ${l}`)] : ['There are no flows yet.']),
+    ...(behind.length ? [`This session's folder has flows from before the flows moved to ${home}, not brought over: ${behind.join(', ')}. Offer to bring them over (${MANAGE} {"action":"import","flow":"<name>"}).`] : []),
+  ]
   if (action === 'list') return [...listed, lines.length ? 'Tell the user, as a short list.' : `Tell the user, and offer to write one with them (${DRAFT}).`].join('\n')
   if (!(MANAGE_ACTIONS as readonly string[]).includes(action)) return `Call ${MANAGE} with "action" one of ${MANAGE_ACTIONS.join(', ')}. To write or change a flow, use ${DRAFT}.`
+  if (action === 'import') {
+    // From a folder the user named, or from this session's Flows folder, where flows were kept before.
+    const from = typeof input.path === 'string' && input.path.trim() ? input.path.trim().replace(/\\/g, '/').replace(/\/+$/, '') : name ? `${await outDir($)}/${name}` : ''
+    const named = to || name || from.split('/').pop() || ''
+    if (!from) return `Name the flow to bring over, or the folder it is in. Ask the user.`
+    if (!NAME.test(named) || VERBS.includes(named)) return `"${named}" is not a flow name: lower-case letters, digits and hyphens. Call again with "to" set to one the user agrees to.`
+    const why = await copyFlow($, from, flowDir(home, named))
+    await loadFlows($)
+    return why ? `${why} Tell the user.` : `Brought "${named}" over to ${flowDir(home, named)}: every session has it now. Its old copy in ${from} is left as it was, and so are its runs there. Tell the user.`
+  }
   // Every other action names a flow: one the person named in their own words is found in the list.
   if (!(await read($, flows)).some(f => f.name === name)) {
     return [name ? `There is no flow named "${name}".` : 'Name the flow.', ...listed, lines.length ? 'If one of these is clearly what the user meant, call again with its name; otherwise ask them which.' : `Tell the user, and offer to write one with them (${DRAFT}).`].join('\n')
@@ -824,17 +1072,41 @@ async function manage($: EngineInterface, input: { action?: unknown; flow?: unkn
     return why ? `${why} Tell the user.` : `Showing ${id === undefined ? `"${name}"` : `run ${id} of "${name}"`} in the Flows pane. Tell the user in a few words.`
   }
   if (action === 'run' || action === 'retry') {
+    if (!(await outDir($))) return `${NO_FOLDER} Tell the user so.`
     await $.ui.open({ id: PANE, title: 'Flows' }).catch(() => undefined)
+    const was = (await read($, runs))[name]
+    let said = ''
     if (action === 'run') {
-      const said = await startRun($, name, typeof input.input === 'string' ? input.input.trim() : '', false)
-      if (!active((await read($, runs))[name])) return `${said} Tell the user.`
+      const inputs = input.inputs && typeof input.inputs === 'object' && !Array.isArray(input.inputs) ? (input.inputs as Record<string, unknown>) : undefined
+      const from = typeof input.from === 'string' || typeof input.from === 'number' ? input.from : undefined
+      said = await startRun($, name, typeof input.input === 'string' ? input.input.trim() : '', false, { ...(inputs ? { inputs } : {}), ...(from !== undefined ? { from } : {}), dry: input.dry === true, replace: input.replace === true })
+      const now = (await read($, runs))[name]
+      if (!now || now.id === was?.id) {
+        const busy = active(was) && now?.id === was?.id ? ` To start a new run in its place, ask the user first, then call again with "replace": true; to go on with it, use "retry" if it stopped, or ${TOOL}.` : ''
+        return `${said}${busy} Tell the user.`
+      }
     } else {
-      const why = await takeUp($, name)
+      const why = await takeUp($, name, typeof input.item === 'number' || typeof input.item === 'string' ? input.item : undefined)
       if (why) return `${why} Tell the user.`
     }
     // The run is this turn's now: the person stopping the chat stops it.
     if (mainTurn) turnOf.set(name, mainTurn)
-    return `${action === 'run' ? 'Started' : 'Took up'} "${name}". Carry it out now, step by step, until it is over:\n${await directive($, name)}`
+    const cost = action === 'run' ? await estimate($, name) : ''
+    return [`${action === 'run' ? said : `Took up "${name}".`}${cost ? ` ${cost}` : ''} Carry it out now, step by step, until it is over:`, await directive($, name)].join('\n')
+  }
+  if (action === 'copy' || action === 'rename') {
+    if (!NAME.test(to) || VERBS.includes(to)) return `Call again with "to" set to the new name: lower-case letters, digits and hyphens, and none of ${VERBS.join(', ')}. Ask the user if they gave none.`
+    if (action === 'rename' && active((await read($, runs))[name])) return `"${name}" is running. Stop it first, then rename it. Tell the user.`
+    const why = await copyFlow($, flowDir(home, name), flowDir(home, to))
+    if (why) return `${why} Tell the user.`
+    if (action === 'copy') {
+      await loadFlows($)
+      return `Copied "${name}" to "${to}" (its steps and scripts, not its memory or runs). Tell the user; ${DRAFT} changes the copy.`
+    }
+    const memory = await $.fs.read(memoryFile(home, name)).catch(() => null)
+    if (memory !== null) await $.fs.write(memoryFile(home, to), memory)
+    const gone = await removeFlow($, name, flowDir(home, name))
+    return `Renamed "${name}" to "${to}"${gone.startsWith('Deleted') ? '' : `, but the old one is still there (${gone})`}. Its earlier runs' files stay under the old name, in Flows/${name}/runs of the folders where they ran. Tell the user.`
   }
   if (action === 'stop') {
     const run = (await read($, runs))[name]
@@ -869,8 +1141,8 @@ export const register: Register = on => {
           type: 'object',
           properties: {
             flow: { type: 'string', description: "The flow's name." },
-            answer: { type: 'string', enum: ['approve', 'reject', 'back'], description: "The user's answer to the approval the flow waits on. Only what the user said." },
-            note: { type: 'string', description: 'With answer "back": what the user wants changed.' },
+            answer: { type: 'string', enum: ['approve', 'edit', 'reject', 'back', 'approve_all'], description: "The user's answer to the approval the flow waits on. Only what the user said. \"edit\" approves it as the user changed it; \"approve_all\" approves every item waiting at the same step." },
+            note: { type: 'string', description: 'With answer "back": what the user wants changed. With "edit": the whole text to hand on, as the user changed it.' },
             approval: { type: 'string', description: 'With an answer: the approval it answers, as "track.step", exactly as the flow named it.' },
             retry: { type: 'boolean', description: 'True to take up a run that failed or was stopped, at its failed step.' },
           },
@@ -882,7 +1154,7 @@ export const register: Register = on => {
     await $.tool
       .register({
         name: 'draft',
-        description: 'Writes or changes a saved flow of the Flows plugin, with the user. Call it with {"flow": name, "action": "start"} when the user wants a new flow or a change to one, in their own words or with /flows new or /flows edit, or a fix after a failed run (' + MANAGE + ' with "list" shows the names already taken): it answers how to interview them and what a flow is made of. Then "propose" sends the whole flow to be checked and shown in the pane as a draft, and "save" writes it once the user agreed; "discard" drops the draft. Never save without the user saying so.',
+        description: 'Writes or changes a saved flow of the Flows plugin, with the user. Call it with {"flow": name, "action": "start"} when the user wants a new flow or a change to one, in their own words or with /flows new or /flows edit, or a fix after a failed run (' + MANAGE + ' with "list" shows the names already taken): it answers how to interview them and what a flow is made of. Then "propose" sends the whole flow, or a "patch" of the steps that change, to be checked and shown in the pane as a draft, and "save" writes it once the user agreed; "discard" drops the draft. Never save without the user saying so.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -890,7 +1162,11 @@ export const register: Register = on => {
             action: { type: 'string', enum: ['start', 'propose', 'save', 'discard'] },
             description: { type: 'string', description: 'With "propose": what the flow does, in a line or two.' },
             cwd: { type: 'string', description: 'With "propose", optional: a folder on this computer the agents may also write in.' },
+            inputs: { type: 'array', items: { type: 'object' }, description: 'With "propose", optional: what the flow asks for when it runs, each { id, description, type, required, default }.' },
+            maxTokens: { type: 'number', description: 'With "propose", optional: the most tokens a run may use.' },
             steps: { type: 'array', items: { type: 'object' }, description: 'With "propose": the steps, in order, as the answer to "start" describes them.' },
+            patch: { type: 'array', items: { type: 'object' }, description: 'With "propose", in place of "steps": the steps that change or are added, each with its "id" and only the fields that change ("after": the id of the step a new one goes after).' },
+            remove: { type: 'array', items: { type: 'string' }, description: 'With "propose" and "patch": the ids of the steps to take out.' },
             files: { type: 'object', additionalProperties: { type: 'string' }, description: 'With "propose": the code of each code step, by its path in the flow\'s folder.' },
             agreed: { type: 'boolean', description: 'With "propose", true only when the user has already said yes to exactly this change (a fix they approved after a failed run): the flow is then saved at once, with no draft and no second question.' },
           },
@@ -903,8 +1179,8 @@ export const register: Register = on => {
       .register({
         name: 'manage',
         description: [
-          'Does what the /flows command does, for the saved flows (repeatable automations) of the Flows plugin, when the user asks in their own words, in any language: "open the flows", "which flows do I have", "start the Spain visits flow with Madrid", "stop it", "take it up again", "delete the test flow".',
-          'Actions: "open" and "close" the Flows pane; "list" the project\'s flows; "show" one in the pane (with "run" for an earlier run); "run" one, with "input" when the user gave one; "retry" takes up a run that failed or was stopped, where it stopped; "stop" a run; "delete" a flow.',
+          'Does what the /flows command does, for the saved flows (repeatable automations) of the Flows plugin, when the user asks in their own words, in any language: "open the flows", "which flows do I have", "start the Spain visits flow with Madrid", "try it without spending tokens", "stop it", "take it up again", "only redo the second client", "copy webdev to webdev2", "delete the test flow".',
+          'Actions: "open" and "close" the Flows pane; "list" the flows; "show" one in the pane (with "run" for an earlier run); "run" one, with "input" or "inputs" when the user gave them, "from" to start at a step, "dry" for a test run that starts no agent, "replace" to stop a run still going and start anew (ask the user first); "retry" takes up a run that failed or was stopped, where it stopped (with "item", only that item); "stop" a run; "copy" and "rename" a flow ("to" the new name); "import" brings over a flow from a folder ("path") or from the session\'s Flows folder; "delete" a flow.',
           'Name the flow as the user did when you do not know its exact name: the answer lists the flows to pick from. After "run" or "retry", do what the answer says, step by step, with mcp__flows__next.',
           'To write a new flow or change one, use mcp__flows__draft. Never set "confirmed" unless the user said yes to that very deletion.',
         ].join(' '),
@@ -914,6 +1190,13 @@ export const register: Register = on => {
             action: { type: 'string', enum: [...MANAGE_ACTIONS] },
             flow: { type: 'string', description: "The flow's name, or the user's words for it." },
             input: { type: 'string', description: 'With "run": what the flow\'s first step receives, from what the user said.' },
+            inputs: { type: 'object', description: 'With "run", for a flow that lists its inputs: their values, by id.' },
+            from: { type: 'string', description: 'With "run": the id or number of the step to start at; the input stands for what the step before would have handed on.' },
+            dry: { type: 'boolean', description: 'With "run": a test run, which starts no agent (each hands on a made-up result) and passes the approvals by itself.' },
+            replace: { type: 'boolean', description: 'With "run": stop the run of this flow still going and start a new one. Only once the user said so.' },
+            item: { type: 'string', description: 'With "retry": the number (or name) of the one item to take up.' },
+            to: { type: 'string', description: 'With "copy", "rename" or "import": the new name.' },
+            path: { type: 'string', description: 'With "import": the folder the flow is in.' },
             run: { type: 'number', description: 'With "show": the number of an earlier run.' },
             confirmed: { type: 'boolean', description: 'With "delete": true only once the user said yes to what the first call said would go.' },
           },
@@ -930,12 +1213,15 @@ export const register: Register = on => {
   on('command.run', { command: 'flows' }, async ($, e) => {
     const [verb = '', name = '', ...rest] = e.args.trim().split(/\s+/)
     if (!verb) return { text: await togglePane($) }
-    if (!(await rootDir($))) return { text: NO_FOLDER }
+    const home = await homeDir($)
+    if (!home) return { text: NO_HOME }
     await loadFlows($)
     if (verb === 'list') {
       const lines = await flowLines($)
-      if (lines.length === 0) return { text: `This project has no flows yet. /flows new <name> <what it should do> writes one, in ${await rootDir($)}.` }
-      return { text: [`${lines.length} flow${lines.length === 1 ? '' : 's'} in ${await rootDir($)}:`, ...lines].join('\n') }
+      const behind = await leftBehind($)
+      const old = behind.length ? [`Not brought over from this folder's Flows yet: ${behind.join(', ')} (ask Claude to import them).`] : []
+      if (lines.length === 0) return { text: [`There are no flows yet. /flows new <name> <what it should do> writes one, in ${home}.`, ...old].join('\n') }
+      return { text: [`${lines.length} flow${lines.length === 1 ? '' : 's'} in ${home}:`, ...lines, ...old].join('\n') }
     }
     if (verb === 'delete') {
       if (!name) return { text: 'Usage: /flows delete <name>' }
@@ -946,8 +1232,14 @@ export const register: Register = on => {
       return { text: await removeFlow($, name, goes.dir) }
     }
     if ((verb === 'run' || verb === 'retry') && name) {
+      if (!(await outDir($))) return { text: NO_FOLDER }
       await $.ui.open({ id: PANE, title: 'Flows' }).catch(() => undefined)
-      return { text: verb === 'run' ? await startRun($, name, rest.join(' ')) : await retryRun($, name) }
+      if (verb === 'retry') return { text: await retryRun($, name, rest[0]) }
+      // --test makes a test run, --new stops the run still going; key=value pairs are the flow's inputs.
+      const words = rest.filter(w => w !== '--test' && w !== '--new')
+      const pairs = words.filter(w => /^[a-zA-Z][\w-]*=/.test(w))
+      const inputs = pairs.length && pairs.length === words.length ? Object.fromEntries(pairs.map(w => [w.slice(0, w.indexOf('=')), w.slice(w.indexOf('=') + 1)])) : undefined
+      return { text: await startRun($, name, inputs ? '' : words.join(' '), true, { ...(inputs ? { inputs } : {}), dry: rest.includes('--test'), replace: rest.includes('--new') }) }
     }
     // Any other first word is a flow to show, with one of its earlier runs when a number follows.
     if (!VERBS.includes(verb)) {
@@ -999,7 +1291,7 @@ export const register: Register = on => {
     return {}
   })
 
-  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => pane($.ui.resolve(e), actsOf($), await read($, flows), await read($, runs), await read($, view), await read($, now), e.surface === 'desktop', e.props.bodyColumns ?? 0, await read($, past), await read($, draft)))
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => pane($.ui.resolve(e), actsOf($), await read($, flows), await read($, runs), await read($, view), await read($, now), e.surface === 'desktop', e.props.bodyColumns ?? 0, await read($, past), await read($, draft), await outDir($)))
 
   // The session's Claude asks what to do next, and brings the person's answer to an approval.
   on('tool.call', { tool: TOOL }, async ($, e) => {
@@ -1015,14 +1307,18 @@ export const register: Register = on => {
     // The approval the person answered is named ("track.step"): a newer one may have come in ahead of it since.
     const named = /^(\d+)\.(\d+)$/.exec(typeof input.approval === 'string' ? input.approval : '')
     const ask = run ? (waiting(run).find(([t, i]) => named && t === Number(named[1]) && i === Number(named[2])) ?? (named ? undefined : waiting(run)[0])) : undefined
-    if (run && ask && (input.answer === 'approve' || input.answer === 'reject' || input.answer === 'back')) await decide($, name, ask[0], ask[1], input.answer, typeof input.note === 'string' ? input.note : '')
+    const note = typeof input.note === 'string' ? input.note : ''
+    if (run && ask && input.answer === 'approve_all') {
+      // Every item waiting at the same step, approved at once.
+      for (const [t, i] of waiting(run).filter(([, i]) => i === ask[1])) await decide($, name, t, i, 'approve', '')
+    } else if (run && ask && (input.answer === 'approve' || input.answer === 'reject' || input.answer === 'back' || input.answer === 'edit')) await decide($, name, ask[0], ask[1], input.answer, note)
     await inflight
     await advance($, name)
     return { result: await directive($, name) }
   }).catch(() => ({ result: `Flows could not work out the next step. Tell the user, and do nothing more for this flow.` }))
 
   // The session's Claude does what /flows does, from the person's own words.
-  on('tool.call', { tool: MANAGE }, async ($, e) => ({ result: await manage($, e as { action?: unknown; flow?: unknown; input?: unknown; run?: unknown; confirmed?: unknown }) })).catch(() => ({ result: 'Flows could not do that. Tell the user, and do nothing more with it.' }))
+  on('tool.call', { tool: MANAGE }, async ($, e) => ({ result: await manage($, e as ManageInput) })).catch(() => ({ result: 'Flows could not do that. Tell the user, and do nothing more with it.' }))
 
   // The session's Claude writes or changes a flow with the person.
   on('tool.call', { tool: DRAFT }, async ($, e) => ({ result: await authoring($, e as Proposal & { flow?: unknown; action?: unknown; agreed?: unknown }) })).catch(() => ({ result: 'Flows could not handle the draft. Tell the user, and do nothing more with it.' }))
@@ -1031,14 +1327,13 @@ export const register: Register = on => {
   // step hands the next never passes through the chat. An agent that is no step waiting to start is refused.
   on('agent.spawn', async ($, e, next) => {
     if (!e.subagentType?.startsWith('flows:')) return next(e)
-    const m = LAUNCH.exec(e.description ?? '')
-    const name = m?.[1] ?? ''
-    const [track, step] = [Number(m?.[3]), Number(m?.[4])]
-    const run = (await read($, runs))[name]
-    const s = run?.tracks[track]?.steps[step]
-    if (!m || !run || run.id !== Number(m[2]) || !toLaunch(run).some(([t, i]) => t === track && i === step) || s?.startedAt === undefined) return { deny: `Flows: this is not a step waiting to start. Call ${TOOL} and use the subagent_type and description it gives.` }
+    // The step is the one waiting to start whose description this is, word for word.
+    const found = Object.entries(await read($, runs)).flatMap(([n, r]) => toLaunch(r).flatMap(([t, i]) => (launchName(r, t, i) === e.description ? [{ name: n, run: r, track: t, step: i }] : [])))[0]
+    const s = found?.run.tracks[found.track]?.steps[found.step]
+    if (!found || s?.startedAt === undefined) return { deny: `Flows: this is not a step waiting to start. Call ${TOOL} and use the subagent_type and description it gives.` }
+    const { name, run, track, step } = found
     const token = s.startedAt
-    const dir = runDir(await rootDir($), name, run.id)
+    const dir = runDir(await outDir($), name, run.id)
     const prompt = await agentPrompt($, run, track, step, dir, token)
     const spawn = (async () => {
       const started = await next({ ...e, prompt, cwd: run.cwd ?? dir, background: true })
@@ -1078,11 +1373,15 @@ export const register: Register = on => {
         }
       }
     }
-    if (e.agentId && known.has(e.agentId)) {
+    // An agent this module started, or one written into a run before the plugin was reloaded (its sets are gone
+    // then, and it runs in the background, as every step's agent does now).
+    const id = e.agentId
+    const isStep = id !== undefined && (known.has(id) || Object.values(await read($, runs)).some(r => agentStep(r, id) !== null))
+    if (id && isStep) {
       const u = e.usage
       const tokens = u ? u.input_tokens + u.output_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens : 0
-      if (detached.has(e.agentId) || e.reason !== 'answer') await agentDone($, e.agentId, e.answer, e.reason, tokens).catch(() => undefined)
-      else ended.set(e.agentId, { answer: e.answer, reason: e.reason, tokens })
+      if (detached.has(id) || !known.has(id) || e.reason !== 'answer') await agentDone($, id, e.answer, e.reason, tokens).catch(() => undefined)
+      else ended.set(id, { answer: e.answer, reason: e.reason, tokens })
     }
     return out
   })
@@ -1119,7 +1418,7 @@ export const register: Register = on => {
       if (tool === HANDBACK) return next(e)
       if (READ_TOOLS.includes(tool) || spec?.tools?.includes(tool)) return { decision: 'allow' as const, reason: `Flow ${name}` }
       if (WRITE_TOOLS.includes(tool)) {
-        const dir = runDir(await rootDir($), name, run.id)
+        const dir = runDir(await outDir($), name, run.id)
         const input = (e.input ?? {}) as { file_path?: unknown; notebook_path?: unknown }
         const path = typeof input.file_path === 'string' ? input.file_path : typeof input.notebook_path === 'string' ? input.notebook_path : ''
         if (inside(path, run.cwd ?? dir, [dir, ...(run.cwd ? [run.cwd] : [])])) return { decision: 'allow' as const, reason: `Flow ${name}` }

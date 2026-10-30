@@ -1,7 +1,7 @@
 // The rules of a flow and of a run, with no engine in them: reading a flow.json, where a run's files go,
 // and every change a run goes through. register.tsx does the work these decide.
 
-import type { Flow, FlowStep, Run, RunStatus, StepRun, Track } from '../types'
+import type { Flow, FlowInput, FlowStep, JsonSchema, Run, RunStatus, StepRun, Track } from '../types'
 
 export const NAME = /^[a-z0-9][a-z0-9-]{0,47}$/
 const TYPES = ['agent', 'code', 'approval', 'each']
@@ -22,8 +22,9 @@ export function parseFlow(name: string, text: string): Flow {
     return bad('flow.json is not valid JSON')
   }
   if (!raw || typeof raw !== 'object') return bad('flow.json is not an object')
-  const f = raw as { description?: unknown; cwd?: unknown; steps?: unknown }
+  const f = raw as { description?: unknown; cwd?: unknown; inputs?: unknown; maxTokens?: unknown; steps?: unknown }
   if (!Array.isArray(f.steps) || f.steps.length === 0) return bad('flow.json has no steps')
+  if (f.inputs !== undefined && (!Array.isArray(f.inputs) || f.inputs.some(x => !x || typeof x !== 'object' || typeof (x as FlowInput).id !== 'string' || !/^[a-zA-Z][\w-]{0,47}$/.test((x as FlowInput).id)))) return bad('flow.json has inputs that are not a list of { id, description, type }')
   const ids = new Set<string>()
   const steps: FlowStep[] = []
   for (const [i, s] of (f.steps as Partial<FlowStep>[]).entries()) {
@@ -39,7 +40,14 @@ export function parseFlow(name: string, text: string): Flow {
     if (s.type === 'each' && i === f.steps.length - 1) return bad(`${at} is an "each" with no step after it`)
     steps.push({ ...s, id, type: s.type as FlowStep['type'], name: typeof s.name === 'string' && s.name ? s.name : id })
   }
-  return { name, description: typeof f.description === 'string' ? f.description : '', ...(typeof f.cwd === 'string' && f.cwd ? { cwd: f.cwd } : {}), steps }
+  return {
+    name,
+    description: typeof f.description === 'string' ? f.description : '',
+    ...(typeof f.cwd === 'string' && f.cwd ? { cwd: f.cwd } : {}),
+    ...(Array.isArray(f.inputs) && f.inputs.length ? { inputs: f.inputs as FlowInput[] } : {}),
+    ...(typeof f.maxTokens === 'number' && f.maxTokens > 0 ? { maxTokens: f.maxTokens } : {}),
+    steps,
+  }
 }
 
 // ——— Where a run's files go ———
@@ -74,7 +82,11 @@ export function inside(path: string, cwd: string, roots: readonly string[]): boo
 
 // ——— A run's changes ———
 
-export function newRun(flow: Flow, id: number, input: string, now: number, owner: string, weekStart: number | null): Run {
+export type RunOptions = { from?: number; vars?: Record<string, unknown>; dry?: boolean }
+
+/** A new run. With `from`, it starts at that step, the input standing for what the step before would have handed on. */
+export function newRun(flow: Flow, id: number, input: string, now: number, owner: string, weekStart: number | null, o: RunOptions = {}): Run {
+  const from = o.from ?? 0
   return {
     id,
     flow: flow.name,
@@ -83,7 +95,10 @@ export function newRun(flow: Flow, id: number, input: string, now: number, owner
     startedAt: now,
     steps: flow.steps,
     ...(flow.cwd ? { cwd: flow.cwd } : {}),
-    tracks: [{ from: 0, at: 0, status: 'running', steps: { 0: { status: 'pending' } } }],
+    ...(o.vars ? { vars: o.vars } : {}),
+    ...(o.dry ? { dry: true } : {}),
+    ...(flow.maxTokens ? { maxTokens: flow.maxTokens } : {}),
+    tracks: [{ from, at: from, status: 'running', steps: { [from]: { status: 'pending' } } }],
     weekStart,
     owner,
     beat: now,
@@ -176,6 +191,17 @@ export function sendBack(run: Run, track: number, step: number, note: string): R
   return setTrack(run, track, { ...t, at: to, steps })
 }
 
+/**
+ * A step's agent asked to do it again, with what was wrong in its result: back to pending, its tries counted.
+ * Null when the step is no longer the one started at `token`.
+ */
+export function again(run: Run, track: number, step: number, token: number, note: string, tokens: number): Run | null {
+  const t = run.tracks[track]
+  const s = t?.steps[step]
+  if (!t || !s || s.startedAt !== token || s.status !== 'running') return null
+  return setTrack(run, track, setStep(t, step, { status: 'pending', note, tries: (s.tries ?? 0) + 1, tokens: (s.tokens ?? 0) + tokens }))
+}
+
 /** Every running or waiting step marked failed with `error` (the run stopped, or its session closed). */
 export function halt(run: Run, why: 'stopped' | 'interrupted', error: string, now: number): Run {
   const tracks = run.tracks.map((t): Track => {
@@ -187,10 +213,10 @@ export function halt(run: Run, why: 'stopped' | 'interrupted', error: string, no
   return { ...run, tracks, halt: why }
 }
 
-/** Every failed track back at its failed step, to run again. */
-export function retry(run: Run, owner: string, now: number): Run {
-  const tracks = run.tracks.map((t): Track => {
-    if (t.status !== 'failed') return t
+/** Every failed track back at its failed step, to run again; with `only`, that track alone. */
+export function retry(run: Run, owner: string, now: number, only?: number): Run {
+  const tracks = run.tracks.map((t, i): Track => {
+    if (t.status !== 'failed' || (only !== undefined && i !== only)) return t
     const s = stepOf(t)
     const again: StepRun = { status: 'pending', ...(s?.note !== undefined ? { note: s.note } : {}), ...(s?.tokens !== undefined ? { tokens: s.tokens } : {}) }
     return { ...setStep(t, t.at, again), status: t.item !== undefined ? 'queued' : 'running' }
@@ -212,9 +238,19 @@ export function itemsOf(text: string): string[] {
   return items.map(x => x.trim()).filter(Boolean).slice(0, MAX_ITEMS)
 }
 
+/** A run started at a step after the "each": the split counted done, and one queued track per item from that step. */
+export function fromItems(run: Run, step: number, labels: readonly string[]): Run {
+  const each = run.steps.findIndex(s => s.type === 'each')
+  const items = labels.map((item): Track => ({ item, from: step, at: step, status: 'queued', steps: { [step]: { status: 'pending' } } }))
+  return { ...run, tracks: [{ from: each, at: each, status: 'done', steps: { [each]: { status: 'done', preview: `${labels.length} item${labels.length === 1 ? '' : 's'}` } } }, ...items] }
+}
+
 /** A short one-line label for an item. */
 export const labelOf = (item: string): string => {
-  const line = item.replace(/\s+/g, ' ').trim()
+  // An item that is a JSON object is called by its first text (a lead's name, say), not by its braces.
+  const value = item.trimStart().startsWith('{') ? jsonOf(item) : undefined
+  const named = value && typeof value === 'object' && !Array.isArray(value) ? Object.values(value).find(v => typeof v === 'string' && v.trim()) : undefined
+  const line = (typeof named === 'string' ? named : item).replace(/\s+/g, ' ').trim()
   return line.length > 60 ? `${line.slice(0, 59)}…` : line
 }
 
@@ -228,4 +264,94 @@ export function agentStep(run: Run, agentId: string): [number, number] | null {
     if (t.status === 'running' && s?.status === 'running' && s.agentId === agentId) return [i, t.at]
   }
   return null
+}
+
+// ——— A step's result checked against its schema ———
+
+/** A result as JSON: the text itself, or inside a ```json fence; undefined when it is none. */
+export function jsonOf(text: string): unknown {
+  const fenced = /```(?:json)?\s*\n([\s\S]*?)\n?```/.exec(text)
+  for (const candidate of [text.trim(), fenced?.[1]?.trim()]) {
+    if (!candidate) continue
+    try {
+      return JSON.parse(candidate)
+    } catch {
+      // not this one
+    }
+  }
+  return undefined
+}
+
+const kind = (v: unknown): string => (v === null ? 'null' : Array.isArray(v) ? 'array' : Number.isInteger(v) ? 'integer' : typeof v)
+
+/** What does not fit `schema` in `value`, one line each, at most 10; empty when it fits. */
+export function misfits(value: unknown, schema: JsonSchema, at = 'the result'): string[] {
+  const out: string[] = []
+  const t = kind(value)
+  if (schema.type && !(schema.type === t || (schema.type === 'number' && t === 'integer'))) return [`${at} should be of type ${schema.type}, not ${t === 'undefined' ? 'missing' : t}`]
+  if (schema.enum && !schema.enum.some(x => JSON.stringify(x) === JSON.stringify(value))) out.push(`${at} should be one of ${schema.enum.map(x => JSON.stringify(x)).join(', ')}`)
+  if (typeof value === 'string' && schema.minLength !== undefined && value.length < schema.minLength) out.push(`${at} should have at least ${schema.minLength} characters`)
+  if (typeof value === 'number' && schema.minimum !== undefined && value < schema.minimum) out.push(`${at} should be at least ${schema.minimum}`)
+  if (typeof value === 'number' && schema.maximum !== undefined && value > schema.maximum) out.push(`${at} should be at most ${schema.maximum}`)
+  if (Array.isArray(value)) {
+    if (schema.minItems !== undefined && value.length < schema.minItems) out.push(`${at} should have at least ${schema.minItems} items, not ${value.length}`)
+    if (schema.maxItems !== undefined && value.length > schema.maxItems) out.push(`${at} should have at most ${schema.maxItems} items, not ${value.length}`)
+    const items = schema.items
+    if (items) value.forEach((x, i) => out.push(...misfits(x, items, `${at}[${i}]`)))
+  }
+  if (t === 'object') {
+    const o = value as Record<string, unknown>
+    for (const key of schema.required ?? []) if (!(key in o)) out.push(`${at} has no "${key}"`)
+    for (const [key, sub] of Object.entries(schema.properties ?? {})) if (key in o) out.push(...misfits(o[key], sub, `${at}.${key}`))
+  }
+  return out.slice(0, 10)
+}
+
+/** A made-up value that fits `schema`, for a test run. */
+export function sample(schema: JsonSchema | undefined, label: string): unknown {
+  if (!schema) return `(test run) ${label}`
+  if (schema.enum?.length) return schema.enum[0]
+  switch (schema.type) {
+    case 'object':
+      return Object.fromEntries(Object.entries(schema.properties ?? {}).map(([k, sub]) => [k, sample(sub, k)]))
+    case 'array':
+      return Array.from({ length: Math.max(schema.minItems ?? 2, 1) }, (_, i) => sample(schema.items, `${label} ${i + 1}`))
+    case 'number':
+    case 'integer':
+      return schema.minimum ?? 1
+    case 'boolean':
+      return true
+    case 'null':
+      return null
+    default:
+      return `(test run) ${label}`
+  }
+}
+
+/** `show` with each {{field}} (or {{a.b}}) taken from `value`; a field it lacks stays as written. */
+export const fill = (show: string, value: unknown): string =>
+  show.replace(/\{\{\s*([\w.-]+)\s*\}\}/g, (all, path: string) => {
+    let v: unknown = value
+    for (const key of path.split('.')) v = v && typeof v === 'object' ? (v as Record<string, unknown>)[key] : undefined
+    return v === undefined ? all : typeof v === 'string' ? v : JSON.stringify(v)
+  })
+
+/** The values of a flow's inputs from what the person gave, each of its type; or what is wrong with them. */
+export function varsOf(inputs: readonly FlowInput[], given: Record<string, unknown>): { vars: Record<string, unknown> } | { error: string } {
+  const vars: Record<string, unknown> = {}
+  for (const d of inputs) {
+    const raw = given[d.id] ?? d.default
+    if (raw === undefined || raw === '') {
+      if (d.required) return { error: `"${d.id}" is needed${d.description ? ` (${d.description})` : ''}` }
+      continue
+    }
+    if (d.type === 'number') {
+      const n = typeof raw === 'number' ? raw : Number(String(raw).trim())
+      if (!Number.isFinite(n)) return { error: `"${d.id}" should be a number, not ${JSON.stringify(raw)}` }
+      vars[d.id] = n
+    } else if (d.type === 'boolean') vars[d.id] = raw === true || /^(true|yes|sim|1)$/i.test(String(raw).trim())
+    else if (d.type === 'list') vars[d.id] = Array.isArray(raw) ? raw.map(String) : String(raw).split(/\s*[,;\n]\s*/).filter(Boolean)
+    else vars[d.id] = typeof raw === 'string' ? raw : JSON.stringify(raw)
+  }
+  return { vars }
 }

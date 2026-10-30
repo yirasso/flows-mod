@@ -3,6 +3,8 @@ import { expect, mock, test } from 'claude-code/testing'
 import { check, sameShape } from '../hooks/author'
 
 const ROOT = 'C:/P/Flows'
+/** The flows are kept in ~/.claude/flows; a run's files go to the session's folder (C:\P). */
+const HOME = 'C:/H/.claude/flows'
 const slash = (path: string): string => path.replace(/\\/g, '/')
 const until = async (done: () => boolean): Promise<void> => {
   for (let i = 0; i < 50_000 && !done(); i++) await Promise.resolve()
@@ -42,6 +44,7 @@ test('/flows new and /flows edit: the tool explains, checks the proposal, shows 
   const prompts: string[] = []
   // The session's folder is the project; its flows are in its Flows folder.
   on('session.cwd', async () => ({ value: 'C:\\P' }) as never)
+  on('env.get', async (_$: unknown, e: { name: string }) => ({ value: e.name === 'USERPROFILE' ? 'C:\\H' : undefined }) as never)
   const time = mock.clock(on)
   on('fs.read', async (_$: unknown, e: { path: string }) => {
     const text = files.get(slash(e.path))
@@ -96,16 +99,16 @@ test('/flows new and /flows edit: the tool explains, checks the proposal, shows 
   expect(presented).toContain('"Save"')
   expect(presented).toContain('steps/shout.js')
   expect(await shown()).toContain('Draft, not saved yet')
-  expect(files.has(`${ROOT}/hello/flow.json`)).toBe(false)
+  expect(files.has(`${HOME}/hello/flow.json`)).toBe(false)
 
   // Saved once the person agreed: the flow's file and its script are written, and the draft is gone.
   expect(await draft({ action: 'save' })).toContain('Saved "hello"')
-  expect(JSON.parse(files.get(`${ROOT}/hello/flow.json`) ?? '{}').steps.length).toBe(2)
-  expect(files.get(`${ROOT}/hello/steps/shout.js`)).toContain('process.stdin')
+  expect(JSON.parse(files.get(`${HOME}/hello/flow.json`) ?? '{}').steps.length).toBe(2)
+  expect(files.get(`${HOME}/hello/steps/shout.js`)).toContain('process.stdin')
   expect(await shown()).not.toContain('Draft, not saved yet')
   expect(await draft({ action: 'save' })).toContain('no draft')
   // /flows list names every flow of the project, with what it does and how its last run went.
-  expect(await run('list')).toContain('hello: Greets someone, loudly. (2 steps · not run yet)')
+  expect(await run('list')).toContain('hello: Greets someone, loudly. (2 steps · not run here yet)')
   expect(await run('new list a flow named after a command')).toContain('none of')
 
   // The name is taken now; /flows edit shows the tool the flow as it is, scripts included.
@@ -119,19 +122,19 @@ test('/flows new and /flows edit: the tool explains, checks the proposal, shows 
   // The script it does not change may be left out; a dropped draft saves nothing.
   expect(await draft({ action: 'propose', description: 'Greets someone, quietly.', steps: [{ ...AGENT, instruction: 'Whisper a greeting.' }, CODE] })).toContain('"Save"')
   expect(await draft({ action: 'discard' })).toContain('nothing was saved')
-  expect(files.get(`${ROOT}/hello/flow.json`)).toContain('loudly')
+  expect(files.get(`${HOME}/hello/flow.json`)).toContain('loudly')
 
   // A fix the person already said yes to is saved at once: no draft, no second question.
   expect(await draft({ action: 'propose', agreed: true, description: 'Greets someone, softly.', steps: [AGENT, CODE] })).toContain('Saved the change')
-  expect(files.get(`${ROOT}/hello/flow.json`)).toContain('softly')
+  expect(files.get(`${HOME}/hello/flow.json`)).toContain('softly')
   expect(await shown()).not.toContain('Draft, not saved yet')
 
   // /flows delete says what goes and deletes nothing until it is typed again with "yes".
   expect(await run('delete nope')).toContain('no flow named')
   expect(await run('delete hello')).toContain('/flows delete hello yes')
-  expect(files.has(`${ROOT}/hello/flow.json`)).toBe(true)
+  expect(files.has(`${HOME}/hello/flow.json`)).toBe(true)
   expect(await run('delete hello yes')).toBe('Deleted "hello".')
-  expect(files.has(`${ROOT}/hello/flow.json`)).toBe(false)
-  expect(files.has(`${ROOT}/hello/steps/shout.js`)).toBe(false)
+  expect(files.has(`${HOME}/hello/flow.json`)).toBe(false)
+  expect(files.has(`${HOME}/hello/steps/shout.js`)).toBe(false)
   expect(await run('list')).toContain('no flows yet')
 })

@@ -1,6 +1,8 @@
 import { expect, mock, test } from 'claude-code/testing'
 
 const ROOT = 'C:/P/Flows'
+/** The flows are kept in ~/.claude/flows; a run's files go to the session's folder (C:\P). */
+const HOME = 'C:/H/.claude/flows'
 const flow = (description: string) => JSON.stringify({ description, steps: [{ id: 'research', type: 'agent', name: 'Research', model: 'haiku', instruction: 'Find facts about the input.' }] })
 const slash = (path: string): string => path.replace(/\\/g, '/')
 
@@ -8,10 +10,11 @@ const slash = (path: string): string => path.replace(/\\/g, '/')
 for (const surface of ['terminal', 'desktop'] as const) {
   test(`the pane picks the flow shown from one picker (${surface})`, async ($, on) => {
     const files = new Map<string, string>([
-      [`${ROOT}/demo/flow.json`, flow('A demo flow')],
-      [`${ROOT}/other/flow.json`, flow('Another flow')],
+      [`${HOME}/demo/flow.json`, flow('A demo flow')],
+      [`${HOME}/other/flow.json`, flow('Another flow')],
     ])
     on('session.cwd', async () => ({ value: 'C:\\P' }) as never)
+    on('env.get', async (_$: unknown, e: { name: string }) => ({ value: e.name === 'USERPROFILE' ? 'C:\\H' : undefined }) as never)
     on('fs.read', async (_$: unknown, e: { path: string }) => {
       const text = files.get(slash(e.path))
       if (text === undefined) throw new Error('no such file')
@@ -56,6 +59,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
 
 test('with no flows, the pane says how to write one, with no controls', async ($, on) => {
   on('session.cwd', async () => ({ value: 'C:\\P' }) as never)
+  on('env.get', async (_$: unknown, e: { name: string }) => ({ value: e.name === 'USERPROFILE' ? 'C:\\H' : undefined }) as never)
   on('fs.list', async () => ({ value: [] }) as never)
   const pane = await $.ui.mount({ plugin: 'flows', surface: 'desktop', component: 'Pane', requestId: 'flows', props: { bodyColumns: 60 } as never })
   expect(await pane.findAll({ type: 'Button' })).toEqual([])

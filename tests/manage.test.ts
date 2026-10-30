@@ -3,15 +3,18 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Run } from '../types'
 
 const ROOT = 'C:/P/Flows'
+/** The flows are kept in ~/.claude/flows; a run's files go to the session's folder (C:\P). */
+const HOME = 'C:/H/.claude/flows'
 const FLOW = JSON.stringify({ description: 'Plans visits in Spain', steps: [{ id: 'plan', type: 'agent', name: 'Plan', model: 'haiku', instruction: 'Plan a visit to the input.' }] })
 const slash = (path: string): string => path.replace(/\\/g, '/')
 
 // The person asks in their own words; the session's Claude calls the manage tool, never a command.
 test('the manage tool opens the pane, lists, runs, stops, takes up and deletes a flow', async ($, on) => {
-  const files = new Map<string, string>([[`${ROOT}/visitas-espanha/flow.json`, FLOW]])
+  const files = new Map<string, string>([[`${HOME}/visitas-espanha/flow.json`, FLOW]])
   const prompts: string[] = []
   const panes: string[] = []
   on('session.cwd', async () => ({ value: 'C:\\P' }) as never)
+  on('env.get', async (_$: unknown, e: { name: string }) => ({ value: e.name === 'USERPROFILE' ? 'C:\\H' : undefined }) as never)
   const time = mock.clock(on)
   on('fs.read', async (_$: unknown, e: { path: string }) => {
     const text = files.get(slash(e.path))
@@ -74,7 +77,7 @@ test('the manage tool opens the pane, lists, runs, stops, takes up and deletes a
 
   // "apaga o flow": first what would go, then only with the person's yes.
   expect(await manage({ action: 'delete', flow: 'visitas-espanha' })).toContain('This would delete the flow "visitas-espanha" for good')
-  expect(files.has(`${ROOT}/visitas-espanha/flow.json`)).toBe(true)
+  expect(files.has(`${HOME}/visitas-espanha/flow.json`)).toBe(true)
   expect(await manage({ action: 'delete', flow: 'visitas-espanha', confirmed: true })).toContain('Deleted "visitas-espanha"')
-  expect(files.has(`${ROOT}/visitas-espanha/flow.json`)).toBe(false)
+  expect(files.has(`${HOME}/visitas-espanha/flow.json`)).toBe(false)
 })
