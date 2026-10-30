@@ -201,6 +201,7 @@ Load your working copy with `claude --plugin-dir <path to the clone>`.
 | `hooks/draw.ts` | The pane's drawings |
 | `hooks/picker.tsx` | The pane's flow picker, drawn on the surface itself |
 | `types/index.d.ts` | The plugin's state contract |
+| `skills/flows/SKILL.md` | What the session's Claude reads when asked how Flows works |
 | `tests/` | Tests for the rules, a whole run, and writing a flow |
 
 [SPEC.md](SPEC.md) records what was decided and why, including the two designs that were tried and dropped. Issues and pull requests are welcome.
